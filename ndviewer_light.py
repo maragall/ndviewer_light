@@ -120,7 +120,7 @@ def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
     elif 620 <= wavelength <= 660:
         return 'red'
     elif wavelength >= 700:
-        return 'red'
+        return 'magenta'
     return 'gray'
 
 
