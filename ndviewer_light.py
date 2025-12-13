@@ -15,7 +15,7 @@ import numpy as np
 
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QMainWindow, 
                              QPushButton, QFileDialog, QApplication)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPalette, QColor
 
 # NDV viewer
@@ -120,7 +120,7 @@ def wavelength_to_colormap(wavelength: int, index: int = 0) -> str:
     elif 620 <= wavelength <= 660:
         return 'red'
     elif wavelength >= 700:
-        return 'darkred'
+        return 'magenta'
     return 'gray'
 
 
@@ -226,8 +226,11 @@ class LightweightViewer(QWidget):
         self.ndv_viewer = None
         self._xarray_data = None  # Store for external access
         self._open_handles = []   # Keep tif handles alive when mmap is used
+        self._last_sig = None
+        self._refresh_timer = None
         self._setup_ui()
         self.load_dataset(dataset_path)
+        self._setup_live_refresh()
     
     def _setup_ui(self):
         layout = QVBoxLayout()
@@ -250,6 +253,186 @@ class LightweightViewer(QWidget):
             layout.addWidget(placeholder, 1)
         
         self.setLayout(layout)
+
+    def _setup_live_refresh(self):
+        """Poll the dataset folder periodically to pick up new timepoints during acquisition."""
+        # Only enable when lazy loading + NDV are available; otherwise refresh does nothing useful.
+        if not (LAZY_LOADING_AVAILABLE and NDV_AVAILABLE and self.ndv_viewer):
+            return
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(750)  # ms; keep light to avoid IO churn
+        self._refresh_timer.timeout.connect(self._maybe_refresh)
+        self._refresh_timer.start()
+
+    def _close_open_handles(self):
+        """Close mmap TiffFile handles (OME path) from the previously loaded dataset."""
+        for h in getattr(self, "_open_handles", []) or []:
+            try:
+                h.close()
+            except Exception:
+                pass
+        self._open_handles = []
+
+    def _force_refresh(self):
+        self._last_sig = None
+        self._maybe_refresh()
+
+    def _dataset_signature(self) -> tuple:
+        """Return a cheap signature that changes when new data likely arrived."""
+        base = Path(self.dataset_path)
+        fmt = detect_format(base)
+
+        if fmt == "single_tiff":
+            tp_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.isdigit()]
+            if not tp_dirs:
+                return (fmt, -1, 0)
+
+            t_vals = sorted(int(d.name) for d in tp_dirs)
+            first_tp = base / str(t_vals[0])
+
+            # FOVs are assumed to only appear in the first timepoint during acquisition.
+            fov_set = set()
+            try:
+                if first_tp.exists():
+                    for f in first_tp.iterdir():
+                        if f.suffix.lower() not in [".tif", ".tiff"]:
+                            continue
+                        m = FPATTERN.search(f.name)
+                        if m:
+                            fov_set.add((m.group("r"), int(m.group("f"))))
+            except Exception:
+                pass
+
+            return (fmt, max(t_vals), len(fov_set))
+
+        # ome_tiff
+        ome_dir = base / "ome_tiff"
+        if not ome_dir.exists():
+            ome_dir = next((d for d in base.iterdir() if d.is_dir() and d.name.isdigit()), base)
+
+        ome_files = sorted(ome_dir.glob("*.ome.tif*"))
+        n_ome = len(ome_files)
+        t_len = -1
+        st = None
+        if ome_files:
+            try:
+                st = ome_files[0].stat()
+            except Exception:
+                st = None
+            try:
+                with tf.TiffFile(str(ome_files[0])) as tif:
+                    series = tif.series[0]
+                    axes = series.axes
+                    shape = series.shape
+                    if "T" in axes:
+                        t_len = int(shape[axes.index("T")])
+                    else:
+                        t_len = 1
+            except Exception:
+                # File may be mid-write; fall back on size/mtime if available
+                pass
+
+        if st is None:
+            return (fmt, n_ome, t_len)
+        return (fmt, n_ome, t_len, st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+
+    def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
+        """Best-effort no-flicker data swap for ndv, depending on installed ndv version."""
+        v = self.ndv_viewer
+        if v is None:
+            return False
+
+        # Try common APIs across versions.
+        candidates = [
+            ("set_data", True),
+            ("setData", True),
+            ("set_array", True),
+            ("setArray", True),
+        ]
+        for name, is_call in candidates:
+            attr = getattr(v, name, None)
+            if callable(attr):
+                try:
+                    attr(data)
+                    return True
+                except Exception:
+                    pass
+
+        # Try common attribute assignment patterns.
+        for prop in ["data", "array"]:
+            if hasattr(v, prop):
+                try:
+                    setattr(v, prop, data)
+                    return True
+                except Exception:
+                    pass
+
+        # Some viewers tuck the model under .viewer or .model
+        for inner_name in ["viewer", "model"]:
+            inner = getattr(v, inner_name, None)
+            if inner is None:
+                continue
+            for name in ["set_data", "setData", "set_array", "setArray"]:
+                fn = getattr(inner, name, None)
+                if callable(fn):
+                    try:
+                        fn(data)
+                        return True
+                    except Exception:
+                        pass
+            for prop in ["data", "array"]:
+                if hasattr(inner, prop):
+                    try:
+                        setattr(inner, prop, data)
+                        return True
+                    except Exception:
+                        pass
+
+        return False
+
+    def _maybe_refresh(self):
+        if not LAZY_LOADING_AVAILABLE:
+            return
+
+        try:
+            sig = self._dataset_signature()
+        except Exception:
+            return
+        if sig == self._last_sig:
+            return
+        self._last_sig = sig
+
+        data = self._create_lazy_array(Path(self.dataset_path))
+        if data is None:
+            return
+
+        # Swap dataset, keeping OME handles alive for the new data
+        old_handles = getattr(self, "_open_handles", [])
+        self._xarray_data = data
+        self._open_handles = data.attrs.get("_open_tifs", [])
+
+        # Prefer in-place update to avoid visible refresh.
+        if self._try_inplace_ndv_update(data):
+            # Close old handles after successful swap.
+            for h in old_handles or []:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+            return
+
+        # Fallback: rebuild widget (may be visible on some platforms). Reduce flicker a bit.
+        try:
+            self.setUpdatesEnabled(False)
+            self._set_ndv_data(data)
+        finally:
+            self.setUpdatesEnabled(True)
+            # Close old handles regardless.
+            for h in old_handles or []:
+                try:
+                    h.close()
+                except Exception:
+                    pass
     
     def load_dataset(self, path: str):
         """Load dataset and display in NDV."""
@@ -264,9 +447,8 @@ class LightweightViewer(QWidget):
                 self._open_handles = data.attrs.get('_open_tifs', [])
                 self._set_ndv_data(data)
                 
-                # Update status with dimensions
-                dims_str = " × ".join(f"{d}={s}" for d, s in zip(data.dims, data.shape))
-                self.status_label.setText(f"Loaded: {dims_str}")
+                # Update status (keep it stable during live acquisition; avoid printing dims like time=...)
+                self.status_label.setText(f"Loaded: {Path(path).name}")
             else:
                 self.status_label.setText("Failed to load dataset")
         except Exception as e:
