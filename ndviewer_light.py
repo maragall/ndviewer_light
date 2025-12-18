@@ -163,7 +163,7 @@ class LauncherWindow(QMainWindow):
         self.status_label = QLabel("No dataset loaded")
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
         self.status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.status_label)
+        # layout.addWidget(self.status_label) # hide status label
         
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -238,7 +238,7 @@ class LightweightViewer(QWidget):
         # Status
         self.status_label = QLabel("Loading dataset...")
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
-        layout.addWidget(self.status_label)
+        # layout.addWidget(self.status_label)
         
         # NDV placeholder
         if NDV_AVAILABLE:
