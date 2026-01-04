@@ -14,6 +14,20 @@ import xarray as xr
 # Import from ndviewer_light to register the wrapper (side effect of import)
 from ndviewer_light import MAX_3D_TEXTURE_SIZE
 
+# Check if the wrapper is available (requires scipy and ndv)
+try:
+    from ndv.models._data_wrapper import _recurse_subclasses, DataWrapper
+
+    wrappers = [w.__name__ for w in _recurse_subclasses(DataWrapper)]
+    WRAPPER_AVAILABLE = "Downsampling3DXarrayWrapper" in wrappers
+except ImportError:
+    WRAPPER_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(
+    not WRAPPER_AVAILABLE,
+    reason="Downsampling3DXarrayWrapper not available (requires scipy and ndv)",
+)
+
 
 @pytest.fixture
 def data_wrapper_class():
