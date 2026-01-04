@@ -138,7 +138,14 @@ def main() -> int:
         help="Channel name strings used in filenames.",
     )
     ap.add_argument("--region", default="R0")
-    ap.add_argument("--z", type=int, default=0)
+    ap.add_argument(
+        "--n-z",
+        "--z",  # Keep --z as deprecated alias for backward compatibility
+        type=int,
+        default=1,
+        dest="n_z",
+        help="Number of z slices (default: 1)",
+    )
     ap.add_argument(
         "--fovs-per-tick-in-t0",
         type=int,
@@ -187,7 +194,7 @@ def main() -> int:
 
     print(f"Writing dataset to: {root}")
     print(
-        f"Plan: n_fov={args.n_fov}, n_ch={args.n_ch}, n_t={args.n_t}, size={args.height}x{args.width}"
+        f"Plan: n_fov={args.n_fov}, n_z={args.n_z}, n_ch={args.n_ch}, n_t={args.n_t}, size={args.height}x{args.width}"
     )
     print(f"Tick interval: {args.interval}s")
 
@@ -201,14 +208,17 @@ def main() -> int:
 
         end = min(args.n_fov, fov_written_t0 + fovs_per_tick)
         for fov in range(fov_written_t0, end):
-            for c, ch_name in enumerate(args.channels):
-                fname = f"{args.region}_{fov}_{args.z}_{ch_name}.tiff"
-                out = tp_dir / fname
-                img = _make_plane(base, t=t, fov=fov, c=c).copy()
-                # Overlay "T=<t> FOV=<fov> CH=<idx>" into the pixels
-                label = f"T={t:02d} FOV={fov:02d} CH={c}"
-                _draw_text(img, label, x=20, y=20, scale=10, value=60000)
-                _atomic_tiff_write(out, img)
+            for z in range(args.n_z):
+                for c, ch_name in enumerate(args.channels):
+                    fname = f"{args.region}_{fov}_{z}_{ch_name}.tiff"
+                    out = tp_dir / fname
+                    img = _make_plane(base, t=t, fov=fov, c=c).copy()
+                    # Add z-dependent intensity variation
+                    img = (img + np.uint16(z * 50)).astype(np.uint16)
+                    # Overlay "T=<t> F=<fov> Z=<z> C=<idx>" into the pixels
+                    label = f"T={t:02d} F={fov} Z={z:02d} C={c}"
+                    _draw_text(img, label, x=20, y=20, scale=10, value=60000)
+                    _atomic_tiff_write(out, img)
         fov_written_t0 = end
         print(f"[t=0] wrote FOVs: 0..{fov_written_t0-1} (of {args.n_fov})")
         time.sleep(args.interval)
@@ -218,14 +228,18 @@ def main() -> int:
         tp_dir = root / str(t)
         tp_dir.mkdir(parents=True, exist_ok=True)
         for fov in range(args.n_fov):
-            for c, ch_name in enumerate(args.channels):
-                fname = f"{args.region}_{fov}_{args.z}_{ch_name}.tiff"
-                out = tp_dir / fname
-                img = _make_plane(base, t=t, fov=fov, c=c).copy()
-                label = f"T={t:02d} FOV={fov:02d} CH={c}"
-                _draw_text(img, label, x=20, y=20, scale=10, value=60000)
-                _atomic_tiff_write(out, img)
-        print(f"[t={t}] wrote all planes ({args.n_fov} fov × {args.n_ch} ch)")
+            for z in range(args.n_z):
+                for c, ch_name in enumerate(args.channels):
+                    fname = f"{args.region}_{fov}_{z}_{ch_name}.tiff"
+                    out = tp_dir / fname
+                    img = _make_plane(base, t=t, fov=fov, c=c).copy()
+                    img = (img + np.uint16(z * 50)).astype(np.uint16)
+                    label = f"T={t:02d} F={fov} Z={z:02d} C={c}"
+                    _draw_text(img, label, x=20, y=20, scale=10, value=60000)
+                    _atomic_tiff_write(out, img)
+        print(
+            f"[t={t}] wrote all planes ({args.n_fov} fov × {args.n_z} z × {args.n_ch} ch)"
+        )
         time.sleep(args.interval)
 
     print("Done writing. Leave the viewer open to browse the dataset.")

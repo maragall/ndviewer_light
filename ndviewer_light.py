@@ -71,12 +71,164 @@ try:
     import tifffile as tf
     import xarray as xr
     import dask.array as da
-    from dask import delayed
     from functools import lru_cache
+    from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
 except ImportError:
     LAZY_LOADING_AVAILABLE = False
+
+# OpenGL 3D texture size limit (conservative estimate for most GPUs)
+MAX_3D_TEXTURE_SIZE = 2048
+
+# Register custom DataWrapper for automatic 3D downsampling
+if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
+    from ndv.models._data_wrapper import XarrayWrapper
+    from collections.abc import Mapping
+
+    class Downsampling3DXarrayWrapper(XarrayWrapper):
+        """XarrayWrapper that automatically downsamples 3D volumes for OpenGL.
+
+        This wrapper extends NDV's XarrayWrapper to detect when a 3D volume
+        request would exceed OpenGL texture limits and automatically downsamples
+        the data. 2D slice requests remain at full resolution.
+        """
+
+        # Higher priority than default XarrayWrapper (50)
+        PRIORITY = 40
+
+        # Class-level cache for OpenGL texture limit (queried once, shared by all instances)
+        _cached_max_texture_size: Optional[int] = None
+
+        def __init__(self, data: xr.DataArray):
+            super().__init__(data)
+
+        @classmethod
+        def _get_max_texture_size(cls) -> int:
+            """Query and cache the GPU's GL_MAX_3D_TEXTURE_SIZE.
+
+            This is queried lazily on first 3D request when OpenGL context exists.
+            Falls back to conservative default if query fails or no context available.
+            """
+            if cls._cached_max_texture_size is None:
+                try:
+                    # Check if vispy has an active GL context before querying
+                    # Calling OpenGL without a context causes segfault
+                    from vispy import app
+
+                    # Check for active vispy application - use _backend_module which
+                    # is set when a backend is actually loaded and initialized
+                    backend = getattr(app, "_backend_module", None)
+                    if backend is None:
+                        logger.debug(
+                            "No vispy backend loaded - using fallback texture size"
+                        )
+                        cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE
+                        return cls._cached_max_texture_size
+
+                    from OpenGL.GL import glGetIntegerv, GL_MAX_3D_TEXTURE_SIZE
+
+                    limit = glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE)
+                    cls._cached_max_texture_size = int(limit)
+                    logger.info(f"Detected GL_MAX_3D_TEXTURE_SIZE: {limit}")
+                except Exception as e:
+                    logger.debug(f"Failed to query GL_MAX_3D_TEXTURE_SIZE: {e}")
+                    cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE  # Fallback
+            return cls._cached_max_texture_size
+
+        @classmethod
+        def supports(cls, obj) -> bool:
+            """Check if this wrapper supports the given object."""
+            # Note: LAZY_LOADING_AVAILABLE check is unnecessary here since this
+            # class is only defined when LAZY_LOADING_AVAILABLE is True (line 85)
+            return isinstance(obj, xr.DataArray)
+
+        def isel(self, index: Mapping[int, int | slice]) -> np.ndarray:
+            """Return a slice of the data, with automatic 3D downsampling.
+
+            For 2D slices (viewing a single plane), returns full resolution.
+            For 3D volumes (viewing a stack), downsamples if needed to fit
+            within OpenGL texture limits.
+
+            Downsampling strategy:
+            - z: scaled independently only if z exceeds the texture limit
+            - x/y: scaled uniformly (same factor) to preserve aspect ratio
+            - channel/time/fov: never scaled
+            """
+            # Get the data using parent's implementation
+            data = super().isel(index)
+
+            # Determine which original dimensions are non-singleton
+            dims = self._data.dims
+            non_singleton_dims = []
+            for i, dim in enumerate(dims):
+                idx = index.get(i, slice(None))
+                if isinstance(idx, slice):
+                    dim_size = self._data.shape[i]
+                    start = idx.start or 0
+                    stop = idx.stop or dim_size
+                    if stop - start > 1:
+                        non_singleton_dims.append(str(dim).lower())
+
+            # Check if we have spatial z dimension (indicates 3D volume)
+            spatial_z_names = {"z", "z_level", "depth", "focus"}
+            has_z = any(d in spatial_z_names for d in non_singleton_dims)
+            if not has_z:
+                return data  # Not a 3D volume request
+
+            # Check if any spatial dimension exceeds the texture limit
+            max_texture_size = self._get_max_texture_size()
+
+            # Build per-dimension scale factors (only for dimensions in output data)
+            # - z: scaled independently (if it exceeds limit)
+            # - x/y: use same scale factor to preserve aspect ratio
+
+            # First pass: find dimensions and their sizes in output data
+            dim_info = []  # [(dim_name, size), ...]
+            for i, dim in enumerate(dims):
+                idx = index.get(i, slice(None))
+                if isinstance(idx, int):
+                    continue  # Dropped dimension
+                dim_info.append((str(dim).lower(), data.shape[len(dim_info)]))
+
+            # Calculate xy scale factor (uniform for x and y to preserve aspect ratio)
+            xy_sizes = [size for name, size in dim_info if name in {"y", "x"}]
+            xy_max = max(xy_sizes) if xy_sizes else 0
+            xy_scale = max_texture_size / xy_max if xy_max > max_texture_size else 1.0
+
+            # Build zoom factors
+            zoom_factors = []
+            needs_downsampling = False
+            for dim_name, dim_size in dim_info:
+                if dim_name in {"y", "x"}:
+                    # Use uniform xy scale to preserve aspect ratio
+                    zoom_factors.append(xy_scale)
+                    if xy_scale < 1.0:
+                        needs_downsampling = True
+                elif dim_name in spatial_z_names and dim_size > max_texture_size:
+                    # z scaled independently
+                    z_scale = max_texture_size / dim_size
+                    zoom_factors.append(z_scale)
+                    needs_downsampling = True
+                else:
+                    zoom_factors.append(1.0)
+
+            if needs_downsampling:
+                logger.info(
+                    f"Downsampling 3D volume from {data.shape} "
+                    f"(factors={[f'{z:.3f}' for z in zoom_factors]}) for OpenGL rendering"
+                )
+
+                # Use order=0 (nearest neighbor) for speed - much faster than bilinear
+                try:
+                    downsampled = ndimage_zoom(data, zoom_factors, order=0)
+                    return downsampled.astype(data.dtype)
+                except Exception as e:
+                    logger.warning(f"Downsampling failed: {e}, returning original data")
+                    return data
+
+            return data
+
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(
@@ -289,7 +441,10 @@ class LightweightViewer(QWidget):
         if NDV_AVAILABLE:
             dummy = np.zeros((1, 100, 100), dtype=np.uint16)
             self.ndv_viewer = ndv.ArrayViewer(
-                dummy, channel_axis=0, channel_mode="composite", visible_axes=(-2, -1)
+                dummy,
+                channel_axis=0,
+                channel_mode="composite",
+                visible_axes=(-2, -1),
             )
             layout.addWidget(self.ndv_viewer.widget(), 1)
         else:
@@ -624,7 +779,7 @@ class LightweightViewer(QWidget):
                 except Exception as e:
                     logger.debug("Failed to parse OME metadata: %s", e)
 
-            axis_map = {"T": "time", "Z": "z_level", "C": "channel", "Y": "y", "X": "x"}
+            axis_map = {"T": "time", "Z": "z", "C": "channel", "Y": "y", "X": "x"}
             dims_base = [axis_map.get(ax, f"ax_{ax}") for ax in axes]
             coords_base = {
                 axis_map.get(ax, f"ax_{ax}"): list(range(dim))
@@ -684,10 +839,10 @@ class LightweightViewer(QWidget):
 
             xarr = xr.DataArray(full_array, dims=dims_full, coords=coords_full)
             # Ensure standard dims exist with singleton axes if missing
-            for ax in ["time", "fov", "z_level", "channel", "y", "x"]:
+            for ax in ["time", "fov", "z", "channel", "y", "x"]:
                 if ax not in xarr.dims:
                     xarr = xarr.expand_dims({ax: [0]})
-            xarr = xarr.transpose("time", "fov", "z_level", "channel", "y", "x")
+            xarr = xarr.transpose("time", "fov", "z", "channel", "y", "x")
             xarr.attrs["luts"] = luts
             xarr.attrs["_open_tifs"] = tifs_kept
             return xarr
@@ -799,11 +954,11 @@ class LightweightViewer(QWidget):
 
             xarr = xr.DataArray(
                 stacked,
-                dims=["time", "fov", "z_level", "channel", "y", "x"],
+                dims=["time", "fov", "z", "channel", "y", "x"],
                 coords={
                     "time": times,
                     "fov": list(range(n_fov)),
-                    "z_level": z_levels,
+                    "z": z_levels,
                     "channel": channels,
                 },
             )
@@ -825,6 +980,8 @@ class LightweightViewer(QWidget):
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
         # Recreate viewer with proper dimensions
+        # Note: 3D button is always enabled - Downsampling3DXarrayWrapper handles
+        # large volumes by automatically downsampling them for OpenGL rendering
         old_widget = self.ndv_viewer.widget()
         layout = self.layout()
 
@@ -833,7 +990,7 @@ class LightweightViewer(QWidget):
             channel_axis=channel_axis,
             channel_mode="composite",
             luts=luts,
-            visible_axes=("y", "x"),  # 2D display, sliders for rest
+            visible_axes=(-2, -1),  # 2D display (y, x), sliders for rest
         )
 
         # Replace widget
