@@ -742,7 +742,7 @@ def data_structure_changed(
     if old_data.dtype != new_data.dtype:
         return True
 
-    # Check if channel count changed (use .sizes for cleaner access)
+    # Check if channel count changed; treat missing "channel" dim as having 0 channels
     if old_data.sizes.get("channel", 0) != new_data.sizes.get("channel", 0):
         return True
 
