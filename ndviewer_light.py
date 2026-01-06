@@ -1045,7 +1045,7 @@ class LightweightViewer(QWidget):
         self._xarray_data = data
         self._open_handles = data.attrs.get("_open_tifs", [])
 
-        # Check if data structure changed (channels, dims) - if so, force full rebuild
+        # Check if data structure changed (dims, channels, channel names, or LUTs) - if so, force full rebuild
         structure_changed = self._data_structure_changed(old_data, data)
 
         # Prefer in-place update to avoid visible refresh, but only if structure unchanged.
@@ -1083,6 +1083,11 @@ class LightweightViewer(QWidget):
         This detects changes in dimensions, channel count, channel names, or LUT
         configuration that would require rebuilding the NDV viewer rather than
         just swapping data in-place.
+
+        Args:
+            old_data: Previous dataset state. May be ``None`` if no prior dataset
+                exists; when ``None``, the structure is treated as changed.
+            new_data: Newly loaded dataset to compare against ``old_data``.
 
         Returns:
             True if structure changed and viewer needs full rebuild.

@@ -25,6 +25,11 @@ def data_structure_changed(old_data, new_data) -> bool:
     This mirrors the logic in LightweightViewer._data_structure_changed()
     so we can test without instantiating the full viewer (which requires Qt).
 
+    NOTE: This duplicates the logic from the actual implementation. If
+    LightweightViewer._data_structure_changed() is modified, this function
+    must be updated to match. When making changes to the detection logic,
+    verify both implementations are in sync to avoid false test confidence.
+
     Args:
         old_data: Previous xarray DataArray (or None for first load)
         new_data: New xarray DataArray
