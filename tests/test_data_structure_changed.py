@@ -19,6 +19,49 @@ import pytest
 xr = pytest.importorskip("xarray")
 
 
+def data_structure_changed(old_data, new_data) -> bool:
+    """Standalone implementation of the detection logic for testing.
+
+    This mirrors the logic in LightweightViewer._data_structure_changed()
+    so we can test without instantiating the full viewer (which requires Qt).
+
+    Args:
+        old_data: Previous xarray DataArray (or None for first load)
+        new_data: New xarray DataArray
+
+    Returns:
+        True if structure changed and viewer needs full rebuild.
+    """
+    if old_data is None:
+        return True
+
+    try:
+        # Check if dims changed
+        if old_data.dims != new_data.dims:
+            return True
+
+        # Check if channel count changed (use .sizes for cleaner access)
+        if old_data.sizes.get("channel", 0) != new_data.sizes.get("channel", 0):
+            return True
+
+        # Check if channel names changed
+        old_names = old_data.attrs.get("channel_names", [])
+        new_names = new_data.attrs.get("channel_names", [])
+        if old_names != new_names:
+            return True
+
+        # Check if LUTs changed
+        old_luts = old_data.attrs.get("luts", {})
+        new_luts = new_data.attrs.get("luts", {})
+        if old_luts != new_luts:
+            return True
+
+        return False
+    except Exception:
+        # On any error, assume structure changed to be safe
+        return True
+
+
 def create_test_xarray(
     dims=("time", "fov", "z", "channel", "y", "x"),
     shape=(1, 1, 1, 3, 100, 100),
@@ -60,47 +103,12 @@ class TestDataStructureChanged:
     We test the comparison logic directly using xarray DataArrays.
     """
 
-    def _data_structure_changed(self, old_data, new_data) -> bool:
-        """Standalone implementation of the detection logic for testing.
-
-        This mirrors the logic in LightweightViewer._data_structure_changed()
-        so we can test without instantiating the full viewer.
-        """
-        if old_data is None:
-            return True
-
-        try:
-            # Check if dims changed
-            if old_data.dims != new_data.dims:
-                return True
-
-            # Check if channel count changed (use .sizes for cleaner access)
-            if old_data.sizes.get("channel", 0) != new_data.sizes.get("channel", 0):
-                return True
-
-            # Check if channel names changed
-            old_names = old_data.attrs.get("channel_names", [])
-            new_names = new_data.attrs.get("channel_names", [])
-            if old_names != new_names:
-                return True
-
-            # Check if LUTs changed
-            old_luts = old_data.attrs.get("luts", {})
-            new_luts = new_data.attrs.get("luts", {})
-            if old_luts != new_luts:
-                return True
-
-            return False
-        except Exception:
-            # On any error, assume structure changed to be safe
-            return True
-
     # --- Tests for None old_data ---
 
     def test_none_old_data_returns_true(self):
         """When old_data is None (first load), should return True."""
         new_data = create_test_xarray()
-        assert self._data_structure_changed(None, new_data) is True
+        assert data_structure_changed(None, new_data) is True
 
     # --- Tests for dimension changes ---
 
@@ -109,7 +117,7 @@ class TestDataStructureChanged:
         old = create_test_xarray(dims=("time", "fov", "z", "channel", "y", "x"))
         new = create_test_xarray(dims=("time", "fov", "z", "channel", "y", "x"))
         # Same dims, same channels, same attrs -> no change
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_different_dims_returns_true(self):
         """When dims differ, should return True."""
@@ -118,7 +126,7 @@ class TestDataStructureChanged:
             dims=("time", "channel", "y", "x"),  # Missing fov and z
             shape=(1, 3, 100, 100),
         )
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_different_dim_order_returns_true(self):
         """When dim order differs, should return True."""
@@ -127,7 +135,7 @@ class TestDataStructureChanged:
             dims=("time", "fov", "channel", "z", "y", "x"),  # z and channel swapped
             shape=(1, 1, 3, 1, 100, 100),
         )
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     # --- Tests for channel count changes ---
 
@@ -135,19 +143,19 @@ class TestDataStructureChanged:
         """When new data has fewer channels, should return True."""
         old = create_test_xarray(shape=(1, 1, 1, 3, 100, 100))  # 3 channels
         new = create_test_xarray(shape=(1, 1, 1, 1, 100, 100))  # 1 channel
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_more_channels_returns_true(self):
         """When new data has more channels, should return True."""
         old = create_test_xarray(shape=(1, 1, 1, 1, 100, 100))  # 1 channel
         new = create_test_xarray(shape=(1, 1, 1, 4, 100, 100))  # 4 channels
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_same_channel_count_returns_false(self):
         """When channel count is same, should not trigger rebuild for count."""
         old = create_test_xarray(shape=(1, 1, 1, 3, 100, 100))
         new = create_test_xarray(shape=(1, 1, 1, 3, 100, 100))
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     # --- Tests for channel name changes ---
 
@@ -155,26 +163,26 @@ class TestDataStructureChanged:
         """When channel names differ, should return True."""
         old = create_test_xarray(channel_names=["DAPI", "GFP", "RFP"])
         new = create_test_xarray(channel_names=["DAPI", "Cy5", "Cy7"])
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_same_channel_names_returns_false(self):
         """When channel names are identical, should not trigger rebuild."""
         old = create_test_xarray(channel_names=["DAPI", "GFP", "RFP"])
         new = create_test_xarray(channel_names=["DAPI", "GFP", "RFP"])
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_channel_names_added_returns_true(self):
         """When new data has channel names but old didn't, should return True."""
         old = create_test_xarray(channel_names=None)  # No channel_names attr
         new = create_test_xarray(channel_names=["DAPI", "GFP", "RFP"])
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_channel_names_removed_returns_true(self):
         """When new data lacks channel names but old had them, should return True."""
         old = create_test_xarray(channel_names=["DAPI", "GFP", "RFP"])
         new = create_test_xarray(channel_names=None)
         # old has names, new has [] (default) -> different
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     # --- Tests for LUT changes ---
 
@@ -182,19 +190,19 @@ class TestDataStructureChanged:
         """When LUTs differ, should return True."""
         old = create_test_xarray(luts={0: "blue", 1: "green", 2: "red"})
         new = create_test_xarray(luts={0: "blue", 1: "yellow", 2: "magenta"})
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_same_luts_returns_false(self):
         """When LUTs are identical, should not trigger rebuild."""
         old = create_test_xarray(luts={0: "blue", 1: "green", 2: "red"})
         new = create_test_xarray(luts={0: "blue", 1: "green", 2: "red"})
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_luts_added_returns_true(self):
         """When new data has LUTs but old didn't, should return True."""
         old = create_test_xarray(luts=None)
         new = create_test_xarray(luts={0: "blue", 1: "green", 2: "red"})
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     # --- Tests for spatial dimension changes (should NOT trigger rebuild) ---
 
@@ -206,7 +214,7 @@ class TestDataStructureChanged:
         """
         old = create_test_xarray(shape=(1, 1, 1, 3, 100, 100))
         new = create_test_xarray(shape=(1, 1, 1, 3, 200, 200))  # Larger XY
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_different_z_count_returns_false(self):
         """When only Z stack depth changes, should NOT trigger rebuild.
@@ -215,7 +223,7 @@ class TestDataStructureChanged:
         """
         old = create_test_xarray(shape=(1, 1, 5, 3, 100, 100))  # 5 Z slices
         new = create_test_xarray(shape=(1, 1, 10, 3, 100, 100))  # 10 Z slices
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_different_time_count_returns_false(self):
         """When only timepoint count changes, should NOT trigger rebuild.
@@ -224,7 +232,7 @@ class TestDataStructureChanged:
         """
         old = create_test_xarray(shape=(5, 1, 1, 3, 100, 100))  # 5 timepoints
         new = create_test_xarray(shape=(10, 1, 1, 3, 100, 100))  # 10 timepoints
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     # --- Tests for combined changes ---
 
@@ -238,7 +246,7 @@ class TestDataStructureChanged:
             shape=(1, 1, 1, 1, 100, 100),
             channel_names=["DAPI"],
         )
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_real_world_scenario_3ch_to_1ch(self):
         """Real-world: switching from 3-channel to 1-channel acquisition."""
@@ -252,7 +260,7 @@ class TestDataStructureChanged:
             channel_names=["405nm"],
             luts={0: "blue"},
         )
-        assert self._data_structure_changed(old, new) is True
+        assert data_structure_changed(old, new) is True
 
     def test_real_world_scenario_same_channels_more_data(self):
         """Real-world: same channels, just more timepoints/FOVs (live acquisition)."""
@@ -266,39 +274,17 @@ class TestDataStructureChanged:
             channel_names=["405nm", "488nm", "561nm"],
             luts={0: "blue", 1: "green", 2: "red"},
         )
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
 
 class TestDataStructureChangedEdgeCases:
     """Edge case tests for _data_structure_changed()."""
 
-    def _data_structure_changed(self, old_data, new_data) -> bool:
-        """Same standalone implementation for testing."""
-        if old_data is None:
-            return True
-
-        try:
-            if old_data.dims != new_data.dims:
-                return True
-            if old_data.sizes.get("channel", 0) != new_data.sizes.get("channel", 0):
-                return True
-            old_names = old_data.attrs.get("channel_names", [])
-            new_names = new_data.attrs.get("channel_names", [])
-            if old_names != new_names:
-                return True
-            old_luts = old_data.attrs.get("luts", {})
-            new_luts = new_data.attrs.get("luts", {})
-            if old_luts != new_luts:
-                return True
-            return False
-        except Exception:
-            return True
-
     def test_empty_channel_names_both_sides(self):
         """When both have empty channel_names, should not trigger rebuild."""
         old = create_test_xarray(channel_names=[])
         new = create_test_xarray(channel_names=[])
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_no_channel_dim_both_sides(self):
         """When neither has channel dimension, should not trigger rebuild."""
@@ -310,11 +296,11 @@ class TestDataStructureChangedEdgeCases:
             dims=("time", "y", "x"),
             shape=(5, 100, 100),
         )
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
 
     def test_luts_empty_dict_vs_none(self):
         """Empty luts dict should equal missing luts (both default to {})."""
         old = create_test_xarray(luts={})
         new = create_test_xarray(luts=None)
         # Both should resolve to {} via .get("luts", {})
-        assert self._data_structure_changed(old, new) is False
+        assert data_structure_changed(old, new) is False
