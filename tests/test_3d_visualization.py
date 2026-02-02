@@ -17,12 +17,13 @@ Cleanup:
         find /tmp -maxdepth 1 -type d -name 'ndv_3d_test_*' -mtime +7 -exec rm -rf {} +  # remove >7 days old
 """
 
+import json
+import sys
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import tifffile
-import json
-from pathlib import Path
-import tempfile
-import sys
 
 
 def generate_3d_test_volume(
@@ -125,8 +126,9 @@ def main():
     # Try to launch viewer
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from ndviewer_light import LightweightMainWindow
         from PyQt5.QtWidgets import QApplication
+
+        from ndviewer_light import LightweightMainWindow
 
         print("Launching viewer...")
         print("  - Check 2D slices show spheres, helix, and tube")

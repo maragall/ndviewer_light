@@ -13,9 +13,10 @@ These tests verify the logic that determines when the NDV viewer needs
 a full rebuild vs. an in-place data swap when switching datasets.
 """
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock
 
 # Import xarray - required for these tests
 xr = pytest.importorskip("xarray")

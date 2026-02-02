@@ -31,7 +31,7 @@ class TestDownsampling3DXarrayWrapper:
 
     def test_wrapper_registration(self, data_wrapper_class):
         """Verify our wrapper is registered with higher priority."""
-        from ndv.models._data_wrapper import _recurse_subclasses, DataWrapper
+        from ndv.models._data_wrapper import DataWrapper, _recurse_subclasses
 
         wrappers = list(_recurse_subclasses(DataWrapper))
         wrapper_names = [w.__name__ for w in wrappers]

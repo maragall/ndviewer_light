@@ -24,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 _FONT_5X7: dict[str, list[str]] = {
     # 5x7 bitmap font, '#' = on, '.' = off
     "0": ["#####", "#...#", "#...#", "#...#", "#...#", "#...#", "#####"],

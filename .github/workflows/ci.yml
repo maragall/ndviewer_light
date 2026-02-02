@@ -41,6 +41,7 @@ jobs:
         run: |
           conda activate ndviewer_light
           pip install pytest
+          pip install -e .
 
       - name: Install system dependencies for Qt
         run: |
@@ -51,4 +52,4 @@ jobs:
         shell: bash -l {0}
         run: |
           conda activate ndviewer_light
-          xvfb-run --auto-servernum pytest -v
+          xvfb-run --auto-servernum python -m pytest -v

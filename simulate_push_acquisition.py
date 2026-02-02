@@ -24,7 +24,6 @@ from PyQt5.QtWidgets import QApplication
 
 from ndviewer_light import LightweightViewer
 
-
 _FONT_5X7: dict[str, list[str]] = {
     "0": ["#####", "#...#", "#...#", "#...#", "#...#", "#...#", "#####"],
     "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
