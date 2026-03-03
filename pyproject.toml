@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ndviewer_light"
+version = "0.1.0"
+description = "Minimal NDV-based viewer for viewing 5-D acquisitions"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "tifffile",
+    "dask",
+    "xarray",
+    "superqt",
+    "pyqt5",
+    "vispy",
+    "zarr",
+    "ndv>=0.4.0,<0.5.0",
+]
+
+[tool.setuptools]
+py-modules = ["ndviewer_light"]
