@@ -4,6 +4,7 @@ Tests verify the API contract without requiring Qt initialization.
 These are logic-focused tests that verify state management and signal handling.
 """
 
+import tempfile
 from pathlib import Path
 
 
@@ -151,7 +152,7 @@ class TestZarrStateManagement:
 
         # Start acquisition
         zarr_acquisition_active = True
-        zarr_acquisition_path = Path("/tmp/test.zarr")
+        zarr_acquisition_path = Path(tempfile.gettempdir()) / "test.zarr"
 
         assert zarr_acquisition_active is True
         assert zarr_acquisition_path is not None
