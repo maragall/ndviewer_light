@@ -345,7 +345,14 @@ try:
     from scipy.ndimage import zoom as ndimage_zoom
 
     LAZY_LOADING_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    import warnings
+
+    warnings.warn(
+        f"Lazy loading disabled: missing dependency '{e.name}'. "
+        f"Install it with: pip install {e.name}",
+        stacklevel=1,
+    )
     LAZY_LOADING_AVAILABLE = False
 
 # OpenGL 3D texture size limit (conservative estimate for most GPUs)
@@ -3130,7 +3137,7 @@ class LightweightViewer(QWidget):
         """
         self._force_refresh()
 
-    def _create_lazy_array(self, base_path: Path) -> Optional[xr.DataArray]:
+    def _create_lazy_array(self, base_path: Path) -> "Optional[xr.DataArray]":
         """Create lazy xarray from dataset - auto-detects format."""
         if not LAZY_LOADING_AVAILABLE:
             return None
@@ -3186,7 +3193,7 @@ class LightweightViewer(QWidget):
 
     def _load_ome_tiff(
         self, base_path: Path, fovs: List[Dict]
-    ) -> Optional[xr.DataArray]:
+    ) -> "Optional[xr.DataArray]":
         """Fast OME-TIFF: mmap via tifffile.aszarr, small chunks, no big graphs."""
         try:
             ome_dir = base_path / "ome_tiff"
@@ -3334,7 +3341,7 @@ class LightweightViewer(QWidget):
 
     def _load_single_tiff(
         self, base_path: Path, fovs: List[Dict]
-    ) -> Optional[xr.DataArray]:
+    ) -> "Optional[xr.DataArray]":
         """Fast single-TIFF: per-plane on-demand loads with tiny LRU cache."""
         try:
             file_index = {}  # (t, region, fov, z, channel) -> filepath
@@ -3477,7 +3484,7 @@ class LightweightViewer(QWidget):
 
     def _load_zarr_v3(
         self, base_path: Path, fovs: List[Dict], structure_type: str
-    ) -> Optional[xr.DataArray]:
+    ) -> "Optional[xr.DataArray]":
         """Load zarr v3 dataset (OME-NGFF format from Squid).
 
         Uses tensorstore to support both zarr v2 and v3 formats.
@@ -3502,7 +3509,7 @@ class LightweightViewer(QWidget):
             traceback.print_exc()
             return None
 
-    def _load_zarr_v3_5d(self, fovs: List[Dict]) -> Optional[xr.DataArray]:
+    def _load_zarr_v3_5d(self, fovs: List[Dict]) -> "Optional[xr.DataArray]":
         """Load per-FOV zarr v3 stores and stack them.
 
         Each FOV is a separate zarr store with dimensions (T, C, Z, Y, X).
@@ -3632,7 +3639,7 @@ class LightweightViewer(QWidget):
 
         return xarr
 
-    def _load_zarr_v3_6d(self, zarr_path: Path) -> Optional[xr.DataArray]:
+    def _load_zarr_v3_6d(self, zarr_path: Path) -> "Optional[xr.DataArray]":
         """Load a single 6D zarr v3 store with FOV dimension.
 
         Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
@@ -3748,7 +3755,7 @@ class LightweightViewer(QWidget):
 
         return xarr
 
-    def _set_ndv_data(self, data: xr.DataArray):
+    def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
         global _current_voxel_scale
 
