@@ -12,22 +12,23 @@ block_cipher = None
 
 vispy_datas = collect_data_files('vispy')
 
-# Collect ALL submodules of ndviewer_light so the package is fully bundled
+# Collect ALL submodules so PyInstaller bundles entire packages
 ndviewer_light_imports = collect_submodules('ndviewer_light')
+ndv_imports = collect_submodules('ndv')
+vispy_imports = collect_submodules('vispy')
+cmap_imports = collect_submodules('cmap')
+psygnal_imports = collect_submodules('psygnal')
 
 a = Analysis(
     ['entry.py'],
     pathex=[os.path.abspath('..')],
     binaries=[],
     datas=vispy_datas,
-    hiddenimports=ndviewer_light_imports + [
+    hiddenimports=ndviewer_light_imports + ndv_imports + vispy_imports + cmap_imports + psygnal_imports + [
         'PyQt5',
         'PyQt5.QtCore',
         'PyQt5.QtGui',
         'PyQt5.QtWidgets',
-        'ndv',
-        'ndv.views._vispy._array_canvas',
-        'ndv.models._data_wrapper',
         'superqt',
         'superqt.sliders',
         'superqt.iconify',
