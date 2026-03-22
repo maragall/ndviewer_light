@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pyinstaller PyOpenGL pytest
+          pip install . pyinstaller PyOpenGL pytest pyconify zarr
 
       - name: Run freeze import tests
         run: pytest tests/test_freeze_imports.py -v
