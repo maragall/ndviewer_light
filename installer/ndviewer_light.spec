@@ -13,6 +13,13 @@ a = Analysis(
     binaries=[],
     datas=vispy_datas,
     hiddenimports=[
+        # Local package (must be listed explicitly for PyInstaller to collect)
+        'ndviewer_light',
+        'ndviewer_light.core',
+        'PyQt5',
+        'PyQt5.QtCore',
+        'PyQt5.QtGui',
+        'PyQt5.QtWidgets',
         'ndv',
         'ndv.views._vispy._array_canvas',
         'ndv.models._data_wrapper',
@@ -40,6 +47,13 @@ a = Analysis(
         'numpy.lib.format',
         'xml.etree.ElementTree',
         'importlib.metadata',
+        # Optional dependencies (bundle when available)
+        'PIL',
+        'colorspacious',
+        'viscm',
+        'numba',
+        'numba.core',
+        'psutil',
     ],
     hookspath=[],
     hooksconfig={},
