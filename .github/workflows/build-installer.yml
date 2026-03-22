@@ -35,7 +35,8 @@ jobs:
         run: pytest tests/test_freeze_imports.py -v
 
       - name: Build with PyInstaller
-        run: pyinstaller installer/ndviewer_light.spec --noconfirm
+        working-directory: installer
+        run: python -m PyInstaller ndviewer_light.spec --noconfirm --distpath ../dist --workpath ../build --clean
 
       - name: Run smoke tests
         continue-on-error: true
@@ -45,4 +46,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ndviewer-light-windows
-          path: dist/
+          path: dist/ndviewer_light/

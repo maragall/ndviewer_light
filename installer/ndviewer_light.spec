@@ -1,19 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file for ndviewer_light."""
+"""PyInstaller spec file for ndviewer_light.
 
+IMPORTANT: Run from the installer/ directory:
+  cd installer && python -m PyInstaller ndviewer_light.spec --noconfirm
+"""
+
+import os
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
 vispy_datas = collect_data_files('vispy')
 
-# Collect ALL submodules of the local ndviewer_light package
-# Structure: ndviewer_light/ -> ndviewer_light/ndviewer_light/ -> core.py
+# Collect ALL submodules of ndviewer_light so the package is fully bundled
 ndviewer_light_imports = collect_submodules('ndviewer_light')
 
 a = Analysis(
     ['entry.py'],
-    pathex=['..'],
+    pathex=[os.path.abspath('..')],
     binaries=[],
     datas=vispy_datas,
     hiddenimports=ndviewer_light_imports + [
@@ -79,7 +83,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,  # TODO: set to False for release builds
     # icon='ndviewer_light.ico',  # TODO: add .ico file
 )
 
