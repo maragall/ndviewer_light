@@ -24,5 +24,4 @@ else:
             with open(_log_path, "w") as f:
                 f.write(tb)
             print(f"\nCrash log written to: {_log_path}", file=sys.stderr)
-            input("Press Enter to close...")
         raise

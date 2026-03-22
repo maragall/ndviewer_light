@@ -84,7 +84,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # TODO: set to False for release builds
+    console=False,
     # icon='ndviewer_light.ico',  # TODO: add .ico file
 )
 
