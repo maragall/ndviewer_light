@@ -22,7 +22,7 @@ def test_import_superqt():
 
 
 def test_import_superqt_iconify():
-    from superqt import iconify  # noqa: F401
+    from superqt.iconify import QIconifyIcon  # noqa: F401
 
 
 def test_import_pyconify():
