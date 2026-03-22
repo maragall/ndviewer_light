@@ -1,21 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec file for ndviewer_light."""
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
 vispy_datas = collect_data_files('vispy')
+
+# Collect ALL submodules of the local ndviewer_light package
+# Structure: ndviewer_light/ -> ndviewer_light/ndviewer_light/ -> core.py
+ndviewer_light_imports = collect_submodules('ndviewer_light')
 
 a = Analysis(
     ['entry.py'],
     pathex=['..'],
     binaries=[],
     datas=vispy_datas,
-    hiddenimports=[
-        # Local package (must be listed explicitly for PyInstaller to collect)
-        'ndviewer_light',
-        'ndviewer_light.core',
+    hiddenimports=ndviewer_light_imports + [
         'PyQt5',
         'PyQt5.QtCore',
         'PyQt5.QtGui',
