@@ -16,8 +16,9 @@ class TestGetFovList:
 
         mock = MagicMock(spec=LightweightViewer)
         mock.dataset_path = dataset_path
-        # Bind the real method to our mock
+        # Bind the real methods to our mock
         mock.get_fov_list = lambda: LightweightViewer.get_fov_list(mock)
+        mock._discover_fovs = LightweightViewer._discover_fovs.__get__(mock)
         return mock
 
     def test_returns_empty_list_when_no_dataset_path(self):

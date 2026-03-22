@@ -42,11 +42,11 @@ window.show()
 ### Standalone
 
 ```bash
-python ndviewer_light.py
+python -m ndviewer_light
 ```
 
 Or open a specific dataset:
 
 ```bash
-python ndviewer_light.py /path/to/dataset
+python -m ndviewer_light /path/to/dataset
 ```
