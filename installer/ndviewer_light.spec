@@ -8,8 +8,8 @@ block_cipher = None
 vispy_datas = collect_data_files('vispy')
 
 a = Analysis(
-    ['installer/entry.py'],
-    pathex=[],
+    ['entry.py'],
+    pathex=['..'],
     binaries=[],
     datas=vispy_datas,
     hiddenimports=[
@@ -64,7 +64,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    icon='ndviewer_light.ico',
+    # icon='ndviewer_light.ico',  # TODO: add .ico file
 )
 
 coll = COLLECT(
