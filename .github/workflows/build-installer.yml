@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pyinstaller PyOpenGL pytest pyconify zarr Pillow colorspacious viscm numba psutil
+          pip install . pyinstaller PyOpenGL pytest pyconify zarr Pillow colorspacious viscm numba psutil ml-dtypes
 
       - name: Run freeze import tests
         run: pytest tests/test_freeze_imports.py -v

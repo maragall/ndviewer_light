@@ -38,6 +38,7 @@ a = Analysis(
         'vispy.app.backends._pyqt5',
         'vispy.visuals.volume',
         'tensorstore',
+        'ml_dtypes',
         'zarr',
         'zarr.storage',
         'OpenGL',
