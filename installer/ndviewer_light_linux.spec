@@ -29,7 +29,7 @@ xcb_libs = []
 for lib_name in [
     'libxcb-icccm', 'libxcb-image', 'libxcb-keysyms',
     'libxcb-randr', 'libxcb-render-util', 'libxcb-xinerama',
-    'libxcb-xfixes', 'libxkbcommon-x11', 'libxkbcommon',
+    'libxcb-xfixes', 'libxcb-shape', 'libxkbcommon-x11', 'libxkbcommon',
 ]:
     result = subprocess.run(
         ['find', '/usr/lib', '-name', f'{lib_name}*.so*', '-type', 'f'],
@@ -112,8 +112,11 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=True,
+    strip=False,  # DO NOT strip — corrupts scipy openblas .so files (ELF page alignment)
     upx=True,
-    upx_exclude=[],
+    upx_exclude=[
+        'libscipy_openblas*.so*',
+        'libopenblas*.so*',
+    ],
     name='ndviewer_light',
 )
