@@ -118,11 +118,7 @@ def create_linux_desktop_entry(exe, module):
     else:
         exec_line = exe
 
-    apps_dir = Path.home() / ".local" / "share" / "applications"
-    apps_dir.mkdir(parents=True, exist_ok=True)
-    desktop_path = apps_dir / "ndviewer-light.desktop"
-
-    desktop_path.write_text(
+    entry_content = (
         "[Desktop Entry]\n"
         f"Name={APP_NAME}\n"
         f"Exec={exec_line}\n"
@@ -131,9 +127,30 @@ def create_linux_desktop_entry(exe, module):
         f"Comment={APP_NAME} - 5D Image Viewer\n"
         "Categories=Science;ImageProcessing;\n"
     )
-    os.chmod(desktop_path, 0o755)
 
-    print(f"Created: {desktop_path}")
+    # Add to application menu
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    apps_path = apps_dir / "ndviewer-light.desktop"
+    apps_path.write_text(entry_content)
+    os.chmod(apps_path, 0o755)
+    print(f"Created: {apps_path}")
+
+    # Add to desktop
+    desktop_dir = Path.home() / "Desktop"
+    if desktop_dir.is_dir():
+        desktop_path = desktop_dir / "ndviewer-light.desktop"
+        desktop_path.write_text(entry_content)
+        os.chmod(desktop_path, 0o755)
+        # Mark as trusted on GNOME (Ubuntu); skip if gio is unavailable
+        try:
+            subprocess.run(
+                ["gio", "set", str(desktop_path), "metadata::trusted", "true"],
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
+        print(f"Created: {desktop_path}")
 
 
 def main():
