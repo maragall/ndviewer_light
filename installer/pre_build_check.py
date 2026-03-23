@@ -3,13 +3,15 @@
 Pre-build validator for PyInstaller projects.
 
 Runs PyInstaller's Analysis phase (hook resolution + dependency collection)
-and scans all collected .pyd/.dll files for missing DLL dependencies using
-pefile. Catches hook gaps and DLL issues WITHOUT a full build.
+and scans all collected binary files for missing dependencies.
+On Windows, uses pefile to scan .pyd/.dll files.
+On Linux, uses ldd to scan .so files.
+Catches hook gaps and dependency issues WITHOUT a full build.
 
 Usage:
     cd installer
     python pre_build_check.py --spec ndviewer_light.spec
-    python pre_build_check.py --spec stitcher.spec
+    python pre_build_check.py --spec ndviewer_light_linux.spec
 """
 
 import argparse
@@ -64,7 +66,11 @@ def run_analysis(spec_path: Path):
 
         # Collect binaries from the dist output folder (may be in _internal/)
         binaries = []
-        for ext in ("**/*.pyd", "**/*.dll"):
+        if sys.platform == "win32":
+            bin_globs = ("**/*.pyd", "**/*.dll")
+        else:
+            bin_globs = ("**/*.so", "**/*.so.*")
+        for ext in bin_globs:
             for f in glob.glob(os.path.join(distpath, ext), recursive=True):
                 name = os.path.basename(f)
                 binaries.append((name, f, "BINARY"))
@@ -72,7 +78,7 @@ def run_analysis(spec_path: Path):
         # If temp build produced no binaries, fall back to existing dist/
         if not binaries:
             existing_dist = os.path.join(str(spec_dir), "..", "dist")
-            for ext in ("**/*.pyd", "**/*.dll"):
+            for ext in bin_globs:
                 for f in glob.glob(os.path.join(existing_dist, ext), recursive=True):
                     name = os.path.basename(f)
                     binaries.append((name, f, "BINARY"))
@@ -98,22 +104,108 @@ def run_analysis(spec_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 2. Analyze collected binaries and check DLL dependencies
+# 2. Analyze collected binaries and check dependencies
 # ---------------------------------------------------------------------------
 
-def check_dll_deps(binaries):
-    """
-    Use pefile to scan all collected .pyd and .dll files for their
-    DLL dependencies. Returns issues found.
+# System libs that Linux always provides (should NOT be bundled)
+SYSTEM_LIBS_LINUX = {
+    "linux-vdso.so.1", "ld-linux-x86-64.so.2",
+    "libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2",
+    "librt.so.1", "libutil.so.1", "libresolv.so.2", "libnsl.so.1",
+    "libcrypt.so.1", "libstdc++.so.6", "libgcc_s.so.1",
+    # GPU driver libs — must use system's
+    "libGL.so.1", "libGLX.so.0", "libGLdispatch.so.0",
+    "libEGL.so.1", "libOpenGL.so.0", "libGLESv2.so.2",
+    # X11 core (always present on desktop Linux)
+    "libX11.so.6", "libXext.so.6", "libXrender.so.1",
+    "libXi.so.6", "libXfixes.so.3", "libXcursor.so.1",
+    "libXrandr.so.2", "libXcomposite.so.1", "libXdamage.so.1",
+    "libxcb.so.1",
+}
 
-    binaries: list of (name, src_path, typecode) tuples
-    """
+# System DLLs that Windows provides (don't need to be bundled)
+SYSTEM_DLLS_WIN = {
+    "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll",
+    "shell32.dll", "ole32.dll", "oleaut32.dll", "comctl32.dll",
+    "comdlg32.dll", "ws2_32.dll", "wsock32.dll", "ntdll.dll",
+    "msvcrt.dll", "ucrtbase.dll", "bcrypt.dll", "crypt32.dll",
+    "secur32.dll", "winspool.drv", "shlwapi.dll", "rpcrt4.dll",
+    "imm32.dll", "winmm.dll", "version.dll", "netapi32.dll",
+    "userenv.dll", "setupapi.dll", "cfgmgr32.dll", "powrprof.dll",
+    "mswsock.dll", "iphlpapi.dll", "wldap32.dll", "normaliz.dll",
+    "dnsapi.dll", "dbghelp.dll", "psapi.dll", "pdh.dll",
+    "vcruntime140.dll", "vcruntime140_1.dll",
+    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+    "concrt140.dll", "vcomp140.dll",
+    "ucrtbased.dll", "vcruntime140d.dll",
+}
+
+
+def _is_system_lib_linux(name):
+    basename = os.path.basename(name)
+    if basename in SYSTEM_LIBS_LINUX:
+        return True
+    for sys_lib in SYSTEM_LIBS_LINUX:
+        base = sys_lib.split(".so")[0]
+        if basename.startswith(base + ".so"):
+            return True
+    return False
+
+
+def _is_system_dll_win(name):
+    name_lower = name.lower()
+    if name_lower in SYSTEM_DLLS_WIN:
+        return True
+    if name_lower.startswith("api-ms-win-"):
+        return True
+    return False
+
+
+def _check_deps_linux(binaries):
+    """Use ldd to scan .so files for missing dependencies."""
+    import subprocess
+
+    binary_paths = []
+    for name, src_path, typecode in binaries:
+        if src_path and os.path.exists(src_path) and ".so" in name:
+            binary_paths.append((name, src_path))
+
+    issues = []
+    checked = 0
+    for name, src_path in binary_paths:
+        checked += 1
+        try:
+            result = subprocess.run(
+                ["ldd", src_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if "not found" in line:
+                    dep = line.split("=>")[0].strip()
+                    if not _is_system_lib_linux(dep):
+                        issues.append({
+                            "binary": name,
+                            "source": src_path,
+                            "missing_dll": dep,
+                        })
+        except Exception as exc:
+            issues.append({
+                "binary": name,
+                "source": src_path,
+                "error": str(exc),
+            })
+
+    return issues, f"Scanned {checked} .so files"
+
+
+def _check_deps_windows(binaries):
+    """Use pefile to scan .pyd/.dll files for missing DLL dependencies."""
     try:
         import pefile
     except ImportError:
         return None, "pefile not installed — skip DLL dependency check (pip install pefile)"
 
-    # Collect all binary paths
     collected_dlls = set()
     binary_paths = []
     for name, src_path, typecode in binaries:
@@ -121,34 +213,6 @@ def check_dll_deps(binaries):
         collected_dlls.add(os.path.basename(name).lower())
         if src_path and os.path.exists(src_path):
             binary_paths.append((name, src_path))
-
-    # System DLLs that Windows provides (don't need to be bundled)
-    SYSTEM_DLLS = {
-        "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll",
-        "shell32.dll", "ole32.dll", "oleaut32.dll", "comctl32.dll",
-        "comdlg32.dll", "ws2_32.dll", "wsock32.dll", "ntdll.dll",
-        "msvcrt.dll", "ucrtbase.dll", "bcrypt.dll", "crypt32.dll",
-        "secur32.dll", "winspool.drv", "shlwapi.dll", "rpcrt4.dll",
-        "imm32.dll", "winmm.dll", "version.dll", "netapi32.dll",
-        "userenv.dll", "setupapi.dll", "cfgmgr32.dll", "powrprof.dll",
-        "mswsock.dll", "iphlpapi.dll", "wldap32.dll", "normaliz.dll",
-        "dnsapi.dll", "dbghelp.dll", "psapi.dll", "pdh.dll",
-        # MSVC runtime — usually redistributed or on system
-        "vcruntime140.dll", "vcruntime140_1.dll",
-        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-        "concrt140.dll", "vcomp140.dll",
-        "ucrtbased.dll", "vcruntime140d.dll",
-        # API sets (Windows 10+)
-        "api-ms-win-",
-    }
-
-    def is_system_dll(name):
-        name_lower = name.lower()
-        if name_lower in SYSTEM_DLLS:
-            return True
-        if name_lower.startswith("api-ms-win-"):
-            return True
-        return False
 
     issues = []
     checked = 0
@@ -168,13 +232,11 @@ def check_dll_deps(binaries):
             for entry in pe.DIRECTORY_ENTRY_IMPORT:
                 dep_dll = entry.dll.decode("utf-8", errors="replace")
                 dep_lower = dep_dll.lower()
-                if is_system_dll(dep_lower):
+                if _is_system_dll_win(dep_lower):
                     continue
-                # Check if this DLL is in our collected set
                 if dep_lower not in collected_dlls:
-                    # Check with python3X.dll pattern
                     if dep_lower.startswith("python3") and dep_lower.endswith(".dll"):
-                        continue  # Python DLL, handled by bootloader
+                        continue
                     issues.append({
                         "binary": name,
                         "source": src_path,
@@ -189,6 +251,19 @@ def check_dll_deps(binaries):
             })
 
     return issues, f"Scanned {checked} .pyd/.dll files"
+
+
+def check_dll_deps(binaries):
+    """
+    Scan collected binary files for missing dependencies.
+    Uses ldd on Linux, pefile on Windows.
+
+    binaries: list of (name, src_path, typecode) tuples
+    """
+    if sys.platform == "win32":
+        return _check_deps_windows(binaries)
+    else:
+        return _check_deps_linux(binaries)
 
 
 # ---------------------------------------------------------------------------
@@ -333,8 +408,9 @@ def main():
             if len(filtered) > 15:
                 print(f"    ... and {len(filtered) - 15} more")
 
-    # --- DLL dependency scan ---
-    print(f"\n--- DLL DEPENDENCY SCAN ---")
+    # --- Binary dependency scan ---
+    scan_type = ".so (ldd)" if sys.platform != "win32" else ".pyd/.dll (pefile)"
+    print(f"\n--- BINARY DEPENDENCY SCAN ({scan_type}) ---")
     dll_issues, dll_summary = check_dll_deps(binaries)
     print(f"  {dll_summary}")
 

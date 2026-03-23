@@ -4,10 +4,22 @@ import sys
 import traceback
 
 if getattr(sys, "frozen", False):
-    os.environ["QT_PLUGIN_PATH"] = os.path.join(
-        sys._MEIPASS, "PyQt5", "Qt5", "plugins"
-    )
-    os.environ["VISPY_DATA_DIR"] = os.path.join(sys._MEIPASS, "vispy")
+    _meipass = sys._MEIPASS
+    if sys.platform == "win32":
+        os.environ["QT_PLUGIN_PATH"] = os.path.join(
+            _meipass, "PyQt5", "Qt5", "plugins"
+        )
+    else:
+        # Linux: set both plugin paths + LD_LIBRARY_PATH for bundled .so files
+        qt_plugins = os.path.join(_meipass, "PyQt5", "Qt5", "plugins")
+        os.environ["QT_PLUGIN_PATH"] = qt_plugins
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(
+            qt_plugins, "platforms"
+        )
+        qt_lib = os.path.join(_meipass, "PyQt5", "Qt5", "lib")
+        existing_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = f"{_meipass}:{qt_lib}:{existing_ld}"
+    os.environ["VISPY_DATA_DIR"] = os.path.join(_meipass, "vispy")
     _log_path = os.path.join(os.path.dirname(sys.executable), "crash.log")
 
 if "--smoke-test" in sys.argv:

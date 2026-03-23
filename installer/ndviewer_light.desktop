@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NDViewer Light
+Comment=Lightweight microscopy data viewer
+Exec=ndviewer_light
+Icon=ndviewer_light
+Categories=Science;Education;Graphics;
+Terminal=false
+StartupNotify=true

@@ -96,10 +96,11 @@ def parse_spec(spec_path: Path):
 # ---------------------------------------------------------------------------
 
 KNOWN_DLL_RISKS = {
-    "sklearn": "msvcp140.dll / vcruntime140.dll in sklearn/.libs/",
-    "scipy": "may bundle MKL or OpenBLAS DLLs",
-    "numba": "LLVM DLLs",
-    "torch": "large CUDA/cuDNN DLLs",
+    "sklearn": "msvcp140.dll / vcruntime140.dll (Win) or libgomp.so (Linux)",
+    "scipy": "may bundle MKL or OpenBLAS .so/.dll files",
+    "numba": "LLVM shared libraries",
+    "torch": "large CUDA/cuDNN shared libraries",
+    "numpy": "may bundle OpenBLAS .so on Linux",
 }
 
 
