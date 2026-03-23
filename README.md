@@ -11,7 +11,7 @@ Requires Python 3.10+.
 ```bash
 git clone https://github.com/Cephla-Lab/ndviewer_light.git
 cd ndviewer_light
-pip install -e .
+pip install -e . --break-system-packages
 ```
 
 This installs an `ndviewer-light` command you can run from anywhere.
@@ -24,6 +24,7 @@ python create_shortcut.py
 
 - **macOS:** Creates an app in `~/Applications/NDViewer Light.app`. Drag it to your Dock if you like.
 - **Windows:** Creates a shortcut on your Desktop.
+- **Linux:** Creates a `.desktop` entry in `~/.local/share/applications/`.
 
 ### Conda environment
 

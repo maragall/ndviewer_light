@@ -112,6 +112,30 @@ def create_windows_shortcut(exe, module):
     print(f"Created: {shortcut_path}")
 
 
+def create_linux_desktop_entry(exe, module):
+    if module:
+        exec_line = f"{exe} -m {module}"
+    else:
+        exec_line = exe
+
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    apps_dir.mkdir(parents=True, exist_ok=True)
+    desktop_path = apps_dir / "ndviewer-light.desktop"
+
+    desktop_path.write_text(
+        "[Desktop Entry]\n"
+        f"Name={APP_NAME}\n"
+        f"Exec={exec_line}\n"
+        "Type=Application\n"
+        "Terminal=false\n"
+        f"Comment={APP_NAME} - 5D Image Viewer\n"
+        "Categories=Science;ImageProcessing;\n"
+    )
+    os.chmod(desktop_path, 0o755)
+
+    print(f"Created: {desktop_path}")
+
+
 def main():
     exe, module = _resolve_launch_command()
     system = platform.system()
@@ -119,6 +143,8 @@ def main():
         create_macos_app(exe, module)
     elif system == "Windows":
         create_windows_shortcut(exe, module)
+    elif system == "Linux":
+        create_linux_desktop_entry(exe, module)
     else:
         print(f"Desktop shortcut creation is not supported on {system}.")
         print(f"You can run the viewer with: {COMMAND_NAME}")
