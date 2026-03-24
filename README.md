@@ -11,15 +11,17 @@ Requires Python 3.10+.
 ```bash
 git clone https://github.com/Cephla-Lab/ndviewer_light.git
 cd ndviewer_light
-pip install -e . --break-system-packages
+pip3 install .
 ```
+
+> On Ubuntu 24.04+, add `--break-system-packages` or use a virtual environment.
 
 This installs an `ndviewer-light` command you can run from anywhere.
 
 #### Create a desktop shortcut (optional)
 
 ```bash
-python create_shortcut.py
+python3 create_shortcut.py
 ```
 
 - **macOS:** Creates an app in `~/Applications/NDViewer Light.app`. Drag it to your Dock if you like.
@@ -36,7 +38,7 @@ conda activate ndviewer_light
 ### As a library
 
 ```bash
-pip install -e /path/to/ndviewer_light
+pip3 install /path/to/ndviewer_light
 ```
 
 ## Usage
