@@ -227,9 +227,12 @@ def main():
     # Filter out: stdlib attrs (re.compile), platform modules (fcntl, posix),
     # internal/build modules, and things PyInstaller handles automatically.
     IGNORE_MISSING = {
-        # Platform-specific (Unix/VMS/Java)
+        # Platform-specific (Unix/VMS/Java/Windows)
         "fcntl", "grp", "pwd", "posix", "resource", "termios", "readline",
         "java", "java.lang", "vms_lib",
+        "msvcrt", "nt", "winreg",  # Windows-only stdlib
+        "org.python.core",  # Jython
+        "dummy", "dummy.Process",
         # Stdlib subattrs that modulefinder misreports
         "os.path", "collections.OrderedDict", "collections.defaultdict",
         "collections.deque", "collections.namedtuple", "collections.Counter",
@@ -240,9 +243,13 @@ def main():
         "ctypes.Array", "ctypes.CDLL", "ctypes.Structure", "ctypes.Union",
         "ctypes.c_char_p", "ctypes.c_ulong", "ctypes.c_void_p",
         "ctypes.cdll", "ctypes.create_string_buffer", "ctypes.sizeof",
-        # Build/test infrastructure
-        "distutils.filelist", "test.support._force_run",
+        "multiprocessing.AuthenticationError", "multiprocessing.BufferTooShort",
+        "multiprocessing.TimeoutError", "multiprocessing.get_context",
+        "multiprocessing.get_start_method", "multiprocessing.set_start_method",
+        # Build/test infrastructure (not needed at runtime)
+        "distutils", "distutils.filelist", "test.support._force_run",
         "packaging.licenses.canonicalize_license_expression",
+        "PyInstaller", "pefile",
     }
     # Stdlib top-level modules that PyInstaller bundles automatically
     STDLIB_AUTO = {

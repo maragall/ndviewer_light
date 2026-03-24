@@ -44,6 +44,8 @@ SYSTEM_LIBS = {
     "libXcomposite.so.1",
     "libXdamage.so.1",
     "libxcb.so.1",
+    # Optional runtime deps (numba TBB backend — falls back gracefully)
+    "libtbb.so.12",
 }
 
 
