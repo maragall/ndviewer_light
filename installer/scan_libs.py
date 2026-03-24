@@ -78,7 +78,19 @@ def main():
     for f in files:
         collected.add(os.path.basename(f))
 
+    # Build LD_LIBRARY_PATH covering all directories in the bundle so ldd
+    # can resolve sibling .so files (especially hashed-name libs from Pillow,
+    # numpy, scipy that reference each other).
+    lib_dirs = set()
+    for f in files:
+        lib_dirs.add(os.path.dirname(os.path.abspath(f)))
+    bundle_ld_path = ":".join(sorted(lib_dirs))
+    scan_env = os.environ.copy()
+    existing_ld = scan_env.get("LD_LIBRARY_PATH", "")
+    scan_env["LD_LIBRARY_PATH"] = f"{bundle_ld_path}:{existing_ld}"
+
     print(f"Scanning {len(files)} .so files ({len(collected)} unique) in {dist_dir}")
+    print(f"  (LD_LIBRARY_PATH includes {len(lib_dirs)} bundle directories)")
     print()
 
     issues = {}
@@ -91,6 +103,7 @@ def main():
             result = subprocess.run(
                 ["ldd", f],
                 capture_output=True, text=True, timeout=10,
+                env=scan_env,
             )
             for line in result.stdout.splitlines():
                 line = line.strip()

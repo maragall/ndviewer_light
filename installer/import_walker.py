@@ -76,16 +76,44 @@ def find_conditional_imports(source_files: list[Path]):
 # ---------------------------------------------------------------------------
 
 def parse_spec(spec_path: Path):
-    """Extract hiddenimports and excludes lists from a .spec file."""
+    """Extract hiddenimports and excludes lists from a .spec file.
+
+    Handles both simple ``hiddenimports=[...]`` and dynamic forms like
+    ``hiddenimports=var1 + var2 + [...]`` by extracting all string literals
+    from the value expression, and also resolving ``collect_submodules()``
+    calls when the packages are importable.
+    """
     text = spec_path.read_text(encoding="utf-8")
 
     def extract_list(name):
-        # Match name=[...] allowing multiline
-        pattern = rf"{name}\s*=\s*\[(.*?)\]"
+        # Find the keyword argument in the Analysis() call.  We grab
+        # everything from ``name=`` up to the next keyword ``\n    \w+=``
+        # or the closing paren of Analysis().
+        pattern = rf"{name}\s*=\s*(.*?)(?=,\n\s+\w+=|\n\))"
         m = re.search(pattern, text, re.DOTALL)
         if not m:
-            return []
-        items = re.findall(r"['\"]([^'\"]+)['\"]", m.group(1))
+            # Fallback: simple name=[...] on one expression
+            pattern2 = rf"{name}\s*=\s*\[(.*?)\]"
+            m2 = re.search(pattern2, text, re.DOTALL)
+            if not m2:
+                return []
+            return re.findall(r"['\"]([^'\"]+)['\"]", m2.group(1))
+
+        value_expr = m.group(1)
+        # Extract all string literals from the expression
+        items = re.findall(r"['\"]([^'\"]+)['\"]", value_expr)
+
+        # Also resolve collect_submodules('pkg') calls if possible
+        for pkg_match in re.finditer(r"collect_submodules\(['\"]([^'\"]+)['\"]\)", text):
+            pkg = pkg_match.group(1)
+            try:
+                from PyInstaller.utils.hooks import collect_submodules
+                items.extend(collect_submodules(pkg))
+            except Exception:
+                # If PyInstaller isn't available or pkg not installed,
+                # at least add the top-level package name
+                items.append(pkg)
+
         return items
 
     return extract_list("hiddenimports"), extract_list("excludes")

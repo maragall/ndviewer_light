@@ -170,6 +170,15 @@ def _check_deps_linux(binaries):
         if src_path and os.path.exists(src_path) and ".so" in name:
             binary_paths.append((name, src_path))
 
+    # Build LD_LIBRARY_PATH covering all directories containing bundled .so
+    # files so ldd can resolve hashed-name sibling libs (Pillow, numpy, etc.)
+    lib_dirs = set()
+    for _, src_path in binary_paths:
+        lib_dirs.add(os.path.dirname(os.path.abspath(src_path)))
+    scan_env = os.environ.copy()
+    existing_ld = scan_env.get("LD_LIBRARY_PATH", "")
+    scan_env["LD_LIBRARY_PATH"] = ":".join(sorted(lib_dirs)) + ":" + existing_ld
+
     issues = []
     checked = 0
     for name, src_path in binary_paths:
@@ -178,6 +187,7 @@ def _check_deps_linux(binaries):
             result = subprocess.run(
                 ["ldd", src_path],
                 capture_output=True, text=True, timeout=10,
+                env=scan_env,
             )
             for line in result.stdout.splitlines():
                 line = line.strip()
