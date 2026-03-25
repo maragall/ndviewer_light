@@ -912,6 +912,25 @@ def detect_zarr_version(path: Path) -> Optional[int]:
     return None
 
 
+class _TensorStoreArrayWrapper:
+    """Thin wrapper around a tensorstore array exposing numpy-compatible dtype.
+
+    Dask's ``from_array`` calls ``np.dtype(arr.dtype)`` internally, which fails
+    with tensorstore's own dtype objects.  This wrapper delegates all indexing
+    to the underlying tensorstore array while reporting a plain numpy dtype so
+    that dask can build its task graph without errors.
+    """
+
+    def __init__(self, ts_array):
+        self._arr = ts_array
+        self.shape = tuple(ts_array.shape)
+        self.dtype = np.dtype(ts_array.dtype.numpy_dtype)
+        self.ndim = len(ts_array.shape)
+
+    def __getitem__(self, idx):
+        return np.asarray(self._arr[idx].read().result())
+
+
 def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     """Open a zarr store using tensorstore, auto-detecting v2/v3 format.
 
@@ -3581,11 +3600,12 @@ class LightweightViewer(QWidget):
                 if ts_arr is None:
                     raise RuntimeError(f"Could not open zarr store at {fov_path}")
 
-                # Create dask array with per-plane chunks
+                # Create dask array with per-plane chunks.
+                # Wrap tensorstore array so dask sees a numpy-compatible dtype.
                 chunks = tuple(
                     1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
                 )
-                darr = da.from_array(ts_arr, chunks=chunks)
+                darr = da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
                 # Ensure shape is (T, C, Z, Y, X)
                 if len(darr.shape) == 4:
@@ -3702,9 +3722,10 @@ class LightweightViewer(QWidget):
             else:
                 luts[i] = wavelength_to_colormap(extract_wavelength(name))
 
-        # Create dask array with per-plane chunks using tensorstore array
+        # Create dask array with per-plane chunks using tensorstore array.
+        # Wrap tensorstore array so dask sees a numpy-compatible dtype.
         chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
-        darr = da.from_array(ts_arr, chunks=chunks)
+        darr = da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
         # Transpose to standard order: (time, fov, z, channel, y, x)
         # Build transpose order based on current axis order
