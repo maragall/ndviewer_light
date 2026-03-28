@@ -4,6 +4,7 @@ Tests verify the API contract without requiring Qt initialization.
 These are logic-focused tests that verify state management and signal handling.
 """
 
+import tempfile
 from pathlib import Path
 
 
@@ -108,8 +109,7 @@ class TestZarrMetadataIntegration:
 
     def test_channel_colors_to_luts(self):
         """Test converting channel colors to LUTs."""
-        from ndviewer_light import hex_to_colormap, wavelength_to_colormap
-        from ndviewer_light.core import extract_wavelength
+        from ndviewer_light import extract_wavelength, hex_to_colormap, wavelength_to_colormap
 
         channel_names = ["DAPI", "GFP", "RFP"]
         channel_colors = ["0000FF", "00FF00", "FF0000"]
@@ -127,8 +127,7 @@ class TestZarrMetadataIntegration:
 
     def test_fallback_to_wavelength_colormap(self):
         """Test fallback to wavelength-based colormap when no colors provided."""
-        from ndviewer_light import wavelength_to_colormap
-        from ndviewer_light.core import extract_wavelength
+        from ndviewer_light import extract_wavelength, wavelength_to_colormap
 
         channel_names = ["Fluorescence 488 nm Ex", "Fluorescence 561 nm Ex"]
 
@@ -151,7 +150,7 @@ class TestZarrStateManagement:
 
         # Start acquisition
         zarr_acquisition_active = True
-        zarr_acquisition_path = Path("/tmp/test.zarr")
+        zarr_acquisition_path = Path(tempfile.gettempdir()) / "test.zarr"
 
         assert zarr_acquisition_active is True
         assert zarr_acquisition_path is not None

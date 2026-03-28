@@ -62,3 +62,15 @@ viewer = LightweightViewer("/path/to/dataset")
 window = LightweightMainWindow("/path/to/dataset")
 window.show()
 ```
+
+### Standalone
+
+```bash
+python -m ndviewer_light
+```
+
+Or open a specific dataset:
+
+```bash
+python -m ndviewer_light /path/to/dataset
+```
