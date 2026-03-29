@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtGui import QColor, QIcon, QPalette, QPixmap, QPainter
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -1336,14 +1336,33 @@ def _apply_dark_theme(widget: QWidget) -> None:
     widget.setPalette(p)
 
 
+def _set_cephla_icon(window: QMainWindow) -> None:
+    """Set the Cephla logo as window icon."""
+    try:
+        from PyQt5.QtSvg import QSvgRenderer
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            renderer = QSvgRenderer(str(logo_path))
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            window.setWindowIcon(QIcon(pixmap))
+    except ImportError:
+        pass
+
+
 class LauncherWindow(QMainWindow):
     """Separate launcher window with dropbox for dataset selection."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NDViewer Lightweight - Open Dataset")
+        self.setWindowTitle("Cephla NDViewer Lightweight - Open Dataset")
         self.setGeometry(100, 100, 400, 300)  # 4:3 aspect, narrower
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         central = QWidget()
         layout = QVBoxLayout()
@@ -1376,6 +1395,15 @@ class LauncherWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
         self.status_label.setAlignment(Qt.AlignCenter)
         # layout.addWidget(self.status_label) # hide status label
+
+        # Subtle branding
+        brand_label = QLabel("cephla")
+        brand_label.setAlignment(Qt.AlignCenter)
+        brand_label.setStyleSheet(
+            "color: rgba(49, 196, 243, 40); font-size: 10px; "
+            "letter-spacing: 4px; padding: 2px;"
+        )
+        layout.addWidget(brand_label)
 
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -1565,6 +1593,7 @@ class LightweightViewer(QWidget):
         self._time_label = QLabel("T")
         self._time_label.setFixedWidth(30)
         self._time_play_btn = _create_play_button(self)
+        self._time_play_btn.setToolTip("Play/pause automatic timepoint cycling")
         self._time_play_btn.clicked.connect(self._on_time_play_clicked)
         if SUPERQT_AVAILABLE:
             self._time_slider = QLabeledSlider(Qt.Horizontal)
@@ -1572,7 +1601,9 @@ class LightweightViewer(QWidget):
             self._time_slider = QSlider(Qt.Horizontal)
         self._time_slider.setMinimum(0)
         self._time_slider.setMaximum(0)
+        self._time_slider.setToolTip("Navigate between timepoints")
         self._time_slider.valueChanged.connect(self._on_time_slider_changed)
+        self._time_label.setToolTip("Current timepoint index")
         t_layout.addWidget(self._time_play_btn)
         t_layout.addWidget(self._time_label)
         t_layout.addWidget(self._time_slider)
@@ -1586,7 +1617,9 @@ class LightweightViewer(QWidget):
         fov_layout.setSpacing(5)
         self._fov_label = QLabel("FOV")
         self._fov_label.setFixedWidth(30)
+        self._fov_label.setToolTip("Current field of view (well:index)")
         self._fov_play_btn = _create_play_button(self)
+        self._fov_play_btn.setToolTip("Play/pause automatic FOV cycling")
         self._fov_play_btn.clicked.connect(self._on_fov_play_clicked)
         if SUPERQT_AVAILABLE:
             self._fov_slider = QLabeledSlider(Qt.Horizontal)
@@ -1594,6 +1627,7 @@ class LightweightViewer(QWidget):
             self._fov_slider = QSlider(Qt.Horizontal)
         self._fov_slider.setMinimum(0)
         self._fov_slider.setMaximum(0)
+        self._fov_slider.setToolTip("Navigate between fields of view")
         self._fov_slider.valueChanged.connect(self._on_fov_slider_changed)
         fov_layout.addWidget(self._fov_play_btn)
         fov_layout.addWidget(self._fov_label)
@@ -3411,6 +3445,13 @@ class LightweightViewer(QWidget):
                 if ax not in xarr.dims:
                     xarr = xarr.expand_dims({ax: [0]})
             xarr = xarr.transpose("time", "fov", "z", "channel", "y", "x")
+
+            # Squeeze out singleton fov/time to avoid showing "0 of 0" sliders
+            if n_fov == 1:
+                xarr = xarr.isel(fov=0, drop=True)
+            if n_t == 1:
+                xarr = xarr.isel(time=0, drop=True)
+
             xarr.attrs["luts"] = luts
             xarr.attrs["channel_names"] = channel_names
             xarr.attrs["_open_tifs"] = tifs_kept
@@ -3560,6 +3601,13 @@ class LightweightViewer(QWidget):
                     "channel": list(range(n_c)),
                 },
             )
+
+            # Squeeze out singleton dimensions to avoid showing "0 of 0" sliders
+            if n_fov == 1:
+                xarr = xarr.isel(fov=0, drop=True)
+            if n_t == 1:
+                xarr = xarr.isel(time=0, drop=True)
+
             xarr.attrs["luts"] = luts
             xarr.attrs["channel_names"] = channel_names
 
@@ -3906,8 +3954,73 @@ class LightweightViewer(QWidget):
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
 
+        # Update scale bar overlay
+        self._update_scale_bar(data)
+
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
+
+    def _update_scale_bar(self, data):
+        """Add or update a scale bar overlay on the viewer."""
+        pixel_size = data.attrs.get("pixel_size_um")
+        if pixel_size is None:
+            # Hide scale bar if no pixel size info
+            if hasattr(self, "_scale_bar_label"):
+                self._scale_bar_label.setVisible(False)
+            return
+
+        # Choose a nice round scale bar length
+        # Target ~100-200 pixels on screen
+        target_pixels = 150
+        physical_length = target_pixels * pixel_size  # in µm
+
+        # Round to a nice number
+        nice_lengths = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+        bar_um = min(nice_lengths, key=lambda x: abs(x - physical_length))
+        bar_pixels = int(bar_um / pixel_size)
+
+        if bar_um >= 1000:
+            label_text = f"{bar_um / 1000:.0f} mm"
+        else:
+            label_text = f"{bar_um} µm"
+
+        if not hasattr(self, "_scale_bar_label"):
+            self._scale_bar_label = QLabel(self)
+            self._scale_bar_label.setStyleSheet(
+                "background: rgba(0, 0, 0, 150); color: white; padding: 4px 8px; "
+                "font-size: 11px; border-radius: 3px;"
+            )
+
+        # Build scale bar: a white line + text
+        bar_html = (
+            f'<div style="text-align: center;">'
+            f'<div style="background: white; height: 3px; width: {bar_pixels}px; '
+            f'margin: 0 auto 3px auto;"></div>'
+            f'<span>{label_text}</span></div>'
+        )
+        self._scale_bar_label.setText(bar_html)
+        self._scale_bar_label.setTextFormat(Qt.RichText)
+        self._scale_bar_label.adjustSize()
+        self._scale_bar_label.setVisible(True)
+
+        # Position in bottom-right of viewer
+        self._scale_bar_label.raise_()
+        QTimer.singleShot(100, self._reposition_scale_bar)
+
+    def _reposition_scale_bar(self):
+        """Reposition scale bar to bottom-right corner."""
+        if not hasattr(self, "_scale_bar_label") or not self._scale_bar_label.isVisible():
+            return
+        parent = self
+        x = parent.width() - self._scale_bar_label.width() - 15
+        y = parent.height() - self._scale_bar_label.height() - 60
+        self._scale_bar_label.move(max(0, x), max(0, y))
+
+    def resizeEvent(self, event):
+        """Reposition scale bar on resize."""
+        super().resizeEvent(event)
+        if hasattr(self, "_scale_bar_label") and self._scale_bar_label.isVisible():
+            self._reposition_scale_bar()
 
     def _initiate_channel_label_update(self):
         """Start the channel label update retry mechanism.
@@ -4001,9 +4114,10 @@ class LightweightMainWindow(QMainWindow):
 
     def __init__(self, dataset_path: str):
         super().__init__()
-        self.setWindowTitle(f"NDViewer Lightweight - {Path(dataset_path).name}")
+        self.setWindowTitle(f"Cephla NDViewer Lightweight - {Path(dataset_path).name}")
         self.setGeometry(100, 100, 720, 540)  # 4:3 aspect, smaller
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         self.viewer = LightweightViewer(dataset_path)
         self.setCentralWidget(self.viewer)
