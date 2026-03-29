@@ -1443,14 +1443,37 @@ class LauncherWindow(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         # layout.addWidget(self.status_label) # hide status label
 
-        # Subtle branding
-        brand_label = QLabel("cephla")
-        brand_label.setAlignment(Qt.AlignCenter)
-        brand_label.setStyleSheet(
-            "color: rgba(49, 196, 243, 40); font-size: 10px; "
-            "letter-spacing: 4px; padding: 2px;"
+        # Subtle branding — logo + text
+        brand_widget = QWidget()
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(0, 0, 0, 4)
+        brand_layout.setSpacing(6)
+        brand_layout.addStretch()
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            try:
+                from PyQt5.QtSvg import QSvgRenderer
+                logo_label = QLabel()
+                renderer = QSvgRenderer(str(logo_path))
+                pm = QPixmap(14, 14)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                renderer.render(p)
+                p.end()
+                logo_label.setPixmap(pm)
+                brand_layout.addWidget(logo_label)
+            except ImportError:
+                pass
+
+        brand_text = QLabel("cephla")
+        brand_text.setStyleSheet(
+            "color: rgba(49, 196, 243, 80); font-size: 10px; "
+            "letter-spacing: 3px;"
         )
-        layout.addWidget(brand_label)
+        brand_layout.addWidget(brand_text)
+        brand_layout.addStretch()
+        layout.addWidget(brand_widget)
 
         central.setLayout(layout)
         self.setCentralWidget(central)
