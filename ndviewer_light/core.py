@@ -1336,6 +1336,53 @@ def _apply_dark_theme(widget: QWidget) -> None:
     widget.setPalette(p)
 
 
+class _ScaleBarWidget(QWidget):
+    """Custom-painted scale bar overlay for the vispy canvas."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bar_width = 100
+        self._text = "100 \u00b5m"
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setFixedSize(160, 28)
+
+    def update_bar(self, bar_width_px: int, text: str):
+        self._bar_width = bar_width_px
+        self._text = text
+        self.setFixedSize(max(bar_width_px + 20, 60), 28)
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt5.QtGui import QFont, QPen, QBrush
+        from PyQt5.QtCore import QRectF
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        # Semi-transparent background
+        p.setBrush(QBrush(QColor(0, 0, 0, 140)))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 4, 4)
+
+        # White bar
+        bar_x = (self.width() - self._bar_width) // 2
+        p.setPen(QPen(QColor(255, 255, 255), 2))
+        p.drawLine(bar_x, 8, bar_x + self._bar_width, 8)
+        # End caps
+        p.drawLine(bar_x, 5, bar_x, 11)
+        p.drawLine(bar_x + self._bar_width, 5, bar_x + self._bar_width, 11)
+
+        # Text
+        font = QFont()
+        font.setPixelSize(10)
+        p.setFont(font)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRectF(0, 12, self.width(), 14), Qt.AlignCenter, self._text)
+
+        p.end()
+
+
 def _set_cephla_icon(window: QMainWindow) -> None:
     """Set the Cephla logo as window icon."""
     try:
@@ -3954,73 +4001,146 @@ class LightweightViewer(QWidget):
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
 
-        # Update scale bar overlay
-        self._update_scale_bar(data)
+        # Update scale bar overlay and add tooltips to ndv controls (deferred)
+        self._setup_scale_bar(data)
+        QTimer.singleShot(500, self._add_ndv_tooltips)
 
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
 
-    def _update_scale_bar(self, data):
-        """Add or update a scale bar overlay on the viewer."""
-        pixel_size = data.attrs.get("pixel_size_um")
-        if pixel_size is None:
-            # Hide scale bar if no pixel size info
-            if hasattr(self, "_scale_bar_label"):
-                self._scale_bar_label.setVisible(False)
+    def _add_ndv_tooltips(self):
+        """Add tooltips to ndv's internal controls."""
+        try:
+            qwidget = self.ndv_viewer.widget()
+            for child in qwidget.findChildren(QWidget):
+                cls_name = type(child).__name__
+                if cls_name == "ROIButton":
+                    child.setToolTip("Draw a rectangular region of interest on the image")
+                elif cls_name == "_DimToggleButton":
+                    child.setToolTip("Toggle between 2D and 3D view")
+                elif cls_name == "QComboBox" and hasattr(child, "currentText"):
+                    text = child.currentText().lower()
+                    if text in ("composite", "grayscale", "rgba"):
+                        child.setToolTip("Channel display mode: composite, grayscale, or RGBA")
+            for btn in qwidget.findChildren(QPushButton):
+                if not btn.text() and btn.toolTip() == "":
+                    btn.setToolTip("Reset zoom to fit image")
+                    break
+            logger.info("Added tooltips to ndv controls")
+        except Exception as e:
+            logger.debug("Could not add ndv tooltips: %s", e)
+
+    def _setup_scale_bar(self, data):
+        """Set up a scale bar that updates with camera zoom."""
+        self._pixel_size_um = data.attrs.get("pixel_size_um")
+        if self._pixel_size_um is None:
+            if hasattr(self, "_scale_bar_widget"):
+                self._scale_bar_widget.setVisible(False)
             return
 
-        # Choose a nice round scale bar length
-        # Target ~100-200 pixels on screen
-        target_pixels = 150
-        physical_length = target_pixels * pixel_size  # in µm
+        # Find the vispy canvas widget inside ndv
+        canvas_widget = None
+        try:
+            qwidget = self.ndv_viewer.widget()
+            if hasattr(qwidget, '_canvas_widget'):
+                canvas_widget = qwidget._canvas_widget
+        except Exception:
+            pass
+        if canvas_widget is None:
+            canvas_widget = self.ndv_viewer.widget()
 
-        # Round to a nice number
-        nice_lengths = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
-        bar_um = min(nice_lengths, key=lambda x: abs(x - physical_length))
-        bar_pixels = int(bar_um / pixel_size)
+        # Create or reuse the scale bar widget, parented to the canvas
+        if not hasattr(self, "_scale_bar_widget"):
+            self._scale_bar_widget = _ScaleBarWidget(canvas_widget)
+        else:
+            self._scale_bar_widget.setParent(canvas_widget)
+
+        self._scale_bar_canvas = canvas_widget
+        self._scale_bar_widget.setVisible(True)
+        self._scale_bar_widget.raise_()
+
+        canvas_widget.installEventFilter(self)
+
+        # Defer camera hook — the ArrayViewer needs time to finalize its canvas/camera
+        QTimer.singleShot(300, self._connect_camera_events)
+        QTimer.singleShot(400, self._redraw_scale_bar)
+
+    def _connect_camera_events(self):
+        """Connect to vispy camera transform events (deferred to ensure camera exists)."""
+        try:
+            vispy_canvas = self.ndv_viewer._canvas
+            cam = vispy_canvas._view.camera
+            cam.events.transform_change.connect(self._on_camera_changed)
+            # Also catch direct mouse wheel on the scene canvas
+            vispy_canvas._canvas.events.mouse_wheel.connect(self._on_camera_changed)
+            self._vispy_canvas = vispy_canvas
+        except Exception:
+            pass
+
+    def _on_camera_changed(self, event=None):
+        """Called when vispy camera transform changes (zoom/pan)."""
+        self._redraw_scale_bar()
+
+    def _redraw_scale_bar(self):
+        """Recompute scale bar size based on current zoom level."""
+        if not hasattr(self, "_pixel_size_um") or self._pixel_size_um is None:
+            return
+        if not hasattr(self, "_scale_bar_widget"):
+            return
+        if not hasattr(self, "_vispy_canvas"):
+            return
+
+        # Camera rect gives the visible region in data-pixel coordinates
+        # canvas width gives the screen pixel width
+        # zoom = screen_pixels / data_pixels
+        try:
+            cam = self._vispy_canvas._view.camera
+            rect = cam.rect
+            canvas_w = self._scale_bar_canvas.width()
+            if rect is None or rect.width <= 0 or canvas_w <= 0:
+                return
+            pixels_per_data_pixel = canvas_w / rect.width
+        except Exception:
+            return
+
+        # How many µm fit in ~120 screen pixels at this zoom?
+        target_screen_px = 120
+        target_um = (target_screen_px / pixels_per_data_pixel) * self._pixel_size_um
+
+        # Snap to a nice round number
+        nice = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+        bar_um = min(nice, key=lambda x: abs(x - target_um))
+
+        # Convert chosen physical length back to screen pixels
+        bar_data_px = bar_um / self._pixel_size_um
+        bar_screen_px = int(bar_data_px * pixels_per_data_pixel)
+        bar_screen_px = max(bar_screen_px, 20)
+        bar_screen_px = min(bar_screen_px, canvas_w - 40)
 
         if bar_um >= 1000:
-            label_text = f"{bar_um / 1000:.0f} mm"
+            text = f"{bar_um / 1000:.0f} mm"
+        elif bar_um >= 1:
+            text = f"{int(bar_um)} \u00b5m" if bar_um == int(bar_um) else f"{bar_um} \u00b5m"
         else:
-            label_text = f"{bar_um} µm"
+            text = f"{bar_um * 1000:.0f} nm"
 
-        if not hasattr(self, "_scale_bar_label"):
-            self._scale_bar_label = QLabel(self)
-            self._scale_bar_label.setStyleSheet(
-                "background: rgba(0, 0, 0, 150); color: white; padding: 4px 8px; "
-                "font-size: 11px; border-radius: 3px;"
-            )
+        self._scale_bar_widget.update_bar(bar_screen_px, text)
 
-        # Build scale bar: a white line + text
-        bar_html = (
-            f'<div style="text-align: center;">'
-            f'<div style="background: white; height: 3px; width: {bar_pixels}px; '
-            f'margin: 0 auto 3px auto;"></div>'
-            f'<span>{label_text}</span></div>'
-        )
-        self._scale_bar_label.setText(bar_html)
-        self._scale_bar_label.setTextFormat(Qt.RichText)
-        self._scale_bar_label.adjustSize()
-        self._scale_bar_label.setVisible(True)
+        # Position bottom-right of canvas
+        cw = self._scale_bar_canvas.width()
+        ch = self._scale_bar_canvas.height()
+        sw = self._scale_bar_widget.width()
+        sh = self._scale_bar_widget.height()
+        self._scale_bar_widget.move(cw - sw - 12, ch - sh - 12)
+        self._scale_bar_widget.raise_()
 
-        # Position in bottom-right of viewer
-        self._scale_bar_label.raise_()
-        QTimer.singleShot(100, self._reposition_scale_bar)
-
-    def _reposition_scale_bar(self):
-        """Reposition scale bar to bottom-right corner."""
-        if not hasattr(self, "_scale_bar_label") or not self._scale_bar_label.isVisible():
-            return
-        parent = self
-        x = parent.width() - self._scale_bar_label.width() - 15
-        y = parent.height() - self._scale_bar_label.height() - 60
-        self._scale_bar_label.move(max(0, x), max(0, y))
-
-    def resizeEvent(self, event):
-        """Reposition scale bar on resize."""
-        super().resizeEvent(event)
-        if hasattr(self, "_scale_bar_label") and self._scale_bar_label.isVisible():
-            self._reposition_scale_bar()
+    def eventFilter(self, obj, event):
+        """Reposition scale bar when canvas is resized."""
+        if obj is getattr(self, "_scale_bar_canvas", None):
+            from PyQt5.QtCore import QEvent
+            if event.type() == QEvent.Resize:
+                QTimer.singleShot(0, self._redraw_scale_bar)
+        return super().eventFilter(obj, event)
 
     def _initiate_channel_label_update(self):
         """Start the channel label update retry mechanism.
