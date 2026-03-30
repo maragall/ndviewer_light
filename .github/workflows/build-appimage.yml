@@ -77,12 +77,12 @@ jobs:
 
       - name: Stage artifact directory
         run: |
-          mkdir -p artifact
-          cp NDViewerLight-x86_64.AppImage artifact/
-          cp README.md artifact/
+          mkdir -p ndviewer-light-linux-appimage
+          cp NDViewerLight-x86_64.AppImage ndviewer-light-linux-appimage/
+          cp README.md ndviewer-light-linux-appimage/
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
           name: ndviewer-light-linux-appimage
-          path: artifact/*
+          path: ndviewer-light-linux-appimage
