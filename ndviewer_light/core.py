@@ -4077,22 +4077,12 @@ class LightweightViewer(QWidget):
         if not hasattr(self, "_scale_bar_widget"):
             return
         # Defer so ndv has time to switch camera
-        QTimer.singleShot(400, self._update_scale_bar_for_ndim)
+        QTimer.singleShot(400, self._reconnect_after_dim_toggle)
 
-    def _update_scale_bar_for_ndim(self):
-        """Show/hide scale bar based on current display dimensionality."""
-        if not hasattr(self, "_scale_bar_widget"):
-            return
-        try:
-            n_axes = self.ndv_viewer.display_model.n_visible_axes
-        except Exception:
-            return
-        if n_axes >= 3:
-            self._scale_bar_widget.setVisible(False)
-        else:
-            self._scale_bar_widget.setVisible(True)
-            self._connect_camera_events()
-            QTimer.singleShot(100, self._redraw_scale_bar)
+    def _reconnect_after_dim_toggle(self):
+        """Reconnect camera events after 2D/3D toggle and redraw scale bar."""
+        self._connect_camera_events()
+        QTimer.singleShot(100, self._redraw_scale_bar)
 
     def _setup_scale_bar(self, data):
         """Set up a scale bar that updates with camera zoom."""
@@ -4154,16 +4144,21 @@ class LightweightViewer(QWidget):
         if not hasattr(self, "_vispy_canvas"):
             return
 
-        # Camera rect gives the visible region in data-pixel coordinates
-        # canvas width gives the screen pixel width
-        # zoom = screen_pixels / data_pixels
+        # Compute zoom: screen_pixels / data_pixels
+        # 2D PanZoom camera has rect; 3D Turntable camera has scale_factor
         try:
             cam = self._vispy_canvas._view.camera
-            rect = cam.rect
             canvas_w = self._scale_bar_canvas.width()
-            if rect is None or rect.width <= 0 or canvas_w <= 0:
+            if canvas_w <= 0:
                 return
-            pixels_per_data_pixel = canvas_w / rect.width
+            rect = getattr(cam, 'rect', None)
+            if rect is not None and rect.width > 0:
+                pixels_per_data_pixel = canvas_w / rect.width
+            else:
+                scale_factor = getattr(cam, 'scale_factor', None)
+                if scale_factor is None or scale_factor <= 0:
+                    return
+                pixels_per_data_pixel = canvas_w / scale_factor
         except Exception:
             return
 
