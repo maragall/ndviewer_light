@@ -4034,6 +4034,7 @@ class LightweightViewer(QWidget):
         # Update scale bar overlay and add tooltips to ndv controls (deferred)
         self._setup_scale_bar(data)
         QTimer.singleShot(500, self._add_ndv_tooltips)
+        QTimer.singleShot(600, self._hook_dim_toggle)
 
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
@@ -4059,6 +4060,39 @@ class LightweightViewer(QWidget):
             logger.info("Added tooltips to ndv controls")
         except Exception as e:
             logger.debug("Could not add ndv tooltips: %s", e)
+
+    def _hook_dim_toggle(self):
+        """Connect to ndv's 2D/3D toggle button to hide scale bar in 3D mode."""
+        try:
+            qwidget = self.ndv_viewer.widget()
+            for child in qwidget.findChildren(QWidget):
+                if type(child).__name__ == "_DimToggleButton":
+                    child.clicked.connect(self._on_dim_toggled)
+                    break
+        except Exception as e:
+            logger.debug("Could not hook dim toggle: %s", e)
+
+    def _on_dim_toggled(self):
+        """Called when the 2D/3D toggle button is clicked."""
+        if not hasattr(self, "_scale_bar_widget"):
+            return
+        # Defer so ndv has time to switch camera
+        QTimer.singleShot(400, self._update_scale_bar_for_ndim)
+
+    def _update_scale_bar_for_ndim(self):
+        """Show/hide scale bar based on current display dimensionality."""
+        if not hasattr(self, "_scale_bar_widget"):
+            return
+        try:
+            n_axes = self.ndv_viewer.display_model.n_visible_axes
+        except Exception:
+            return
+        if n_axes >= 3:
+            self._scale_bar_widget.setVisible(False)
+        else:
+            self._scale_bar_widget.setVisible(True)
+            self._connect_camera_events()
+            QTimer.singleShot(100, self._redraw_scale_bar)
 
     def _setup_scale_bar(self, data):
         """Set up a scale bar that updates with camera zoom."""
