@@ -440,6 +440,10 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
             """
             # Get the data using parent's implementation
             data = super().isel(index)
+            logger.debug(
+                "Downsampling3DXarrayWrapper.isel: index=%s, data.shape=%s, dims=%s",
+                index, data.shape, self._data.dims,
+            )
 
             # Determine which original dimensions are non-singleton
             dims = self._data.dims
@@ -1333,6 +1337,8 @@ def _apply_dark_theme(widget: QWidget) -> None:
     p.setColor(QPalette.ButtonText, QColor(255, 255, 255))
     p.setColor(QPalette.Highlight, QColor(42, 130, 218))
     p.setColor(QPalette.HighlightedText, QColor(35, 35, 35))
+    p.setColor(QPalette.ToolTipBase, QColor(53, 53, 53))
+    p.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
     widget.setPalette(p)
 
 
@@ -1459,6 +1465,7 @@ class LauncherWindow(QMainWindow):
                 pm = QPixmap(14, 14)
                 pm.fill(Qt.transparent)
                 p = QPainter(pm)
+                p.setOpacity(80 / 255)
                 renderer.render(p)
                 p.end()
                 logo_label.setPixmap(pm)
