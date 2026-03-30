@@ -39,15 +39,18 @@ jobs:
         working-directory: installer
         run: python -m PyInstaller ndviewer_light.spec --noconfirm --distpath ../dist --workpath ../build --clean
 
-      - name: Include README in dist
-        run: copy README.md dist\ndviewer_light\README.md
-
       - name: Run smoke tests
         continue-on-error: true
-        run: dist/ndviewer_light/ndviewer_light.exe --smoke-test
+        run: dist\ndviewer_light.exe --smoke-test
+
+      - name: Stage artifact directory
+        run: |
+          mkdir artifact
+          copy dist\ndviewer_light.exe artifact\ndviewer_light.exe
+          copy README.md artifact\README.md
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: ndviewer-light-windows
-          path: dist/ndviewer_light/*
+          path: artifact/*
