@@ -1,0 +1,89 @@
+name: Build Linux AppImage
+
+on:
+  push:
+    branches:
+      - main
+      - feat/ubuntu-installer
+      - user-feedback-fixes
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install system dependencies for Qt/xcb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
+            libxcb-xfixes0 libxcb-shape0 libegl1 libgl1-mesa-dev libglib2.0-0 wget
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pyinstaller PyOpenGL pytest pyconify zarr Pillow colorspacious viscm numba psutil ml-dtypes
+
+      - name: Pre-test — freeze import tests
+        run: pytest tests/test_freeze_imports.py -v
+
+      - name: Pre-test — import walker (static analysis)
+        continue-on-error: true
+        run: python installer/import_walker.py --entry installer/entry.py --spec installer/ndviewer_light_linux.spec --path .
+
+      - name: Build with PyInstaller (onedir)
+        working-directory: installer
+        run: python -m PyInstaller ndviewer_light_linux.spec --noconfirm --distpath ../dist --workpath ../build --clean
+
+      - name: Post-build — scan .so dependencies
+        continue-on-error: true
+        run: python installer/scan_libs.py dist/ndviewer_light/
+
+      - name: Post-build — smoke test frozen executable
+        continue-on-error: true
+        run: xvfb-run --auto-servernum dist/ndviewer_light/ndviewer_light --smoke-test
+
+      - name: Assemble AppImage
+        run: |
+          mkdir -p NDViewerLight.AppDir/usr
+          cp -r dist/ndviewer_light/* NDViewerLight.AppDir/usr/
+          cp installer/ndviewer_light.desktop NDViewerLight.AppDir/
+          cp installer/ndviewer_light.png NDViewerLight.AppDir/
+          cp installer/ndviewer_light.png NDViewerLight.AppDir/.DirIcon
+          ln -sf usr/ndviewer_light NDViewerLight.AppDir/AppRun
+
+          wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run NDViewerLight.AppDir NDViewerLight-x86_64.AppImage
+
+      - name: Verify AppImage smoke test
+        continue-on-error: true
+        run: xvfb-run --auto-servernum ./NDViewerLight-x86_64.AppImage --appimage-extract-and-run --smoke-test
+
+      - name: Stage artifact directory
+        run: |
+          mkdir -p artifact
+          cp NDViewerLight-x86_64.AppImage artifact/
+          cp README.md artifact/
+          cp ndviewer_light/cephla_logo.svg artifact/
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndviewer-light-linux-appimage
+          path: artifact/*
