@@ -39,8 +39,10 @@ jobs:
         working-directory: installer
         run: python -m PyInstaller ndviewer_light.spec --noconfirm --distpath ../dist --workpath ../build --clean
 
-      - name: Include README in dist
-        run: copy README.md dist\ndviewer_light\README.md
+      - name: Include README and logo in dist
+        run: |
+          copy README.md dist\ndviewer_light\README.md
+          copy ndviewer_light\cephla_logo.svg dist\ndviewer_light\cephla_logo.svg
 
       - name: Run smoke tests
         continue-on-error: true
