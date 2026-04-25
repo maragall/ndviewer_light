@@ -59,41 +59,11 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: dist/NDViewerLight.app/Contents/MacOS/ndviewer_light --smoke-test
 
-      - name: Build .dmg via hdiutil
-        run: |
-          mkdir -p dmg-staging
-          cp -R dist/NDViewerLight.app dmg-staging/
-          ln -s /Applications dmg-staging/Applications
-          hdiutil create \
-            -volname "NDViewer Light" \
-            -srcfolder dmg-staging \
-            -ov -format UDZO \
-            NDViewerLight.dmg
-
       - name: Stage artifact directory
         run: |
           mkdir -p artifact
-          cp NDViewerLight.dmg artifact/
+          cp -R dist/NDViewerLight.app artifact/
           cp README.md artifact/
-          cat > artifact/INSTALL.txt <<'EOF'
-          NDViewer Light — macOS install
-          ================================
-
-          1. Open NDViewerLight.dmg and drag NDViewerLight.app to /Applications.
-
-          2. The first time you launch, macOS may say the app is from an
-             unidentified developer (the build is ad-hoc signed, not notarized).
-             Right-click the app in /Applications and choose "Open" — that
-             allows it once and remembers your choice.
-
-          3. If the app still refuses to open with a "damaged" message
-             (caused by the quarantine attribute on downloaded archives),
-             remove it from Terminal:
-
-               xattr -dr com.apple.quarantine /Applications/NDViewerLight.app
-
-             (This is the same trick used for any unsigned-but-trusted app.)
-          EOF
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
