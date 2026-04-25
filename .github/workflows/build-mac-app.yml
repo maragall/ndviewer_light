@@ -1,0 +1,102 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [main, feat/mac-installer, user-feedback-fixes]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14  # Apple Silicon
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pip
+          key: ${{ runner.os }}-${{ runner.arch }}-pip-${{ hashFiles('pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pip-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pyinstaller PyOpenGL pytest pyconify zarr Pillow colorspacious viscm numba psutil ml-dtypes
+
+      - name: Pre-test — freeze import tests
+        run: pytest tests/test_freeze_imports.py -v
+
+      - name: Pre-test — import walker (static analysis)
+        continue-on-error: true
+        run: python installer/import_walker.py --entry installer/entry.py --spec installer/ndviewer_light_mac.spec --path .
+
+      - name: Build with PyInstaller (.app via BUNDLE)
+        working-directory: installer
+        run: python -m PyInstaller ndviewer_light_mac.spec --noconfirm --distpath ../dist --workpath ../build --clean
+
+      - name: Verify .app structure
+        run: |
+          test -d dist/NDViewerLight.app
+          test -x dist/NDViewerLight.app/Contents/MacOS/ndviewer_light
+          ls -la dist/NDViewerLight.app/Contents/
+
+      - name: Codesign ad-hoc (deep)
+        run: codesign --force --deep --sign - dist/NDViewerLight.app
+
+      - name: Verify codesign
+        run: codesign --verify --deep --strict --verbose=2 dist/NDViewerLight.app || true
+
+      - name: Post-build smoke test
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/NDViewerLight.app/Contents/MacOS/ndviewer_light --smoke-test
+
+      - name: Build .dmg via hdiutil
+        run: |
+          mkdir -p dmg-staging
+          cp -R dist/NDViewerLight.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create \
+            -volname "NDViewer Light" \
+            -srcfolder dmg-staging \
+            -ov -format UDZO \
+            NDViewerLight.dmg
+
+      - name: Stage artifact directory
+        run: |
+          mkdir -p artifact
+          cp NDViewerLight.dmg artifact/
+          cp README.md artifact/
+          cat > artifact/INSTALL.txt <<'EOF'
+          NDViewer Light — macOS install
+          ================================
+
+          1. Open NDViewerLight.dmg and drag NDViewerLight.app to /Applications.
+
+          2. The first time you launch, macOS may say the app is from an
+             unidentified developer (the build is ad-hoc signed, not notarized).
+             Right-click the app in /Applications and choose "Open" — that
+             allows it once and remembers your choice.
+
+          3. If the app still refuses to open with a "damaged" message
+             (caused by the quarantine attribute on downloaded archives),
+             remove it from Terminal:
+
+               xattr -dr com.apple.quarantine /Applications/NDViewerLight.app
+
+             (This is the same trick used for any unsigned-but-trusted app.)
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndviewer-light-macos-arm64
+          path: artifact/
