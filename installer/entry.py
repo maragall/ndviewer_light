@@ -1,4 +1,10 @@
 """Frozen entry point for PyInstaller-built ndviewer_light."""
+# MUST be first: in a frozen app, multiprocessing spawn re-launches the
+# bundle binary. freeze_support() short-circuits the child relaunch so it
+# does NOT re-run main() and open another window. No-op in the parent.
+import multiprocessing
+multiprocessing.freeze_support()
+
 import os
 import sys
 import traceback
