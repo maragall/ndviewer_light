@@ -1693,7 +1693,7 @@ class LightweightViewer(QWidget):
         fov_layout.setContentsMargins(0, 0, 0, 0)
         fov_layout.setSpacing(5)
         self._fov_label = QLabel("FOV")
-        self._fov_label.setFixedWidth(30)
+        self._fov_label.setMinimumWidth(80)
         self._fov_label.setToolTip("Current field of view (well:index)")
         self._fov_play_btn = _create_play_button(self)
         self._fov_play_btn.setToolTip("Play/pause automatic FOV cycling")
