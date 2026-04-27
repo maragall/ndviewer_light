@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feat/windows-installer
+      - feat/mac-installer
       - user-feedback-fixes
 
 jobs:
