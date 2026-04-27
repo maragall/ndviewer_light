@@ -13,10 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Cache pip packages
         uses: actions/cache@v4
@@ -36,6 +36,9 @@ jobs:
       - name: Pre-test — import walker (static analysis)
         continue-on-error: true
         run: python installer/import_walker.py --entry installer/entry.py --spec installer/ndviewer_light_mac.spec --path .
+
+      - name: Apply VisPy Blackwell patch (idempotent)
+        run: python installer/patch_vispy_blackwell.py
 
       - name: Build with PyInstaller (.app via BUNDLE)
         working-directory: installer
