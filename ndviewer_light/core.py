@@ -4041,6 +4041,7 @@ class LightweightViewer(QWidget):
 
         # Update scale bar overlay and add tooltips to ndv controls (deferred)
         self._setup_scale_bar(data)
+        self._setup_fov_overlay(data)
         QTimer.singleShot(500, self._add_ndv_tooltips)
         QTimer.singleShot(600, self._hook_dim_toggle)
 
@@ -4127,6 +4128,94 @@ class LightweightViewer(QWidget):
         QTimer.singleShot(300, self._connect_camera_events)
         QTimer.singleShot(400, self._redraw_scale_bar)
 
+    def _setup_fov_overlay(self, data):
+        """Bottom-left overlay that shows the current FOV name.
+
+        Mirrors _setup_scale_bar's strategy: parent a small widget to ndv's
+        canvas so it floats over the image. The label text is the current
+        coord value of the "fov" dim — readable strings like "A1:0" come
+        from the loaders that build human FOV labels; numeric coords are
+        shown as-is.
+        """
+        # Hide overlay if there is no FOV dimension or only a single FOV
+        if "fov" not in data.dims or data.sizes.get("fov", 1) <= 1:
+            if hasattr(self, "_fov_overlay_label"):
+                self._fov_overlay_label.setVisible(False)
+            return
+
+        canvas_widget = None
+        try:
+            qwidget = self.ndv_viewer.widget()
+            if hasattr(qwidget, "_canvas_widget"):
+                canvas_widget = qwidget._canvas_widget
+        except Exception:
+            pass
+        if canvas_widget is None:
+            canvas_widget = self.ndv_viewer.widget()
+
+        if not hasattr(self, "_fov_overlay_label"):
+            self._fov_overlay_label = QLabel(canvas_widget)
+            self._fov_overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._fov_overlay_label.setStyleSheet(
+                "background: rgba(0, 0, 0, 140); color: white; "
+                "padding: 4px 8px; border-radius: 4px; font-size: 11px;"
+            )
+        else:
+            self._fov_overlay_label.setParent(canvas_widget)
+
+        self._fov_overlay_canvas = canvas_widget
+        self._fov_overlay_label.setVisible(True)
+        self._fov_overlay_label.raise_()
+
+        # Live updates: listen for ndv's current_index changes if available.
+        try:
+            dm = getattr(self.ndv_viewer, "display_model", None)
+            if dm is not None and hasattr(dm, "events"):
+                ev = getattr(dm.events, "current_index", None)
+                if ev is not None and not getattr(self, "_fov_overlay_connected", False):
+                    ev.connect(self._update_fov_overlay)
+                    self._fov_overlay_connected = True
+        except Exception:
+            pass
+
+        # Initial paint + position (deferred so the canvas has its real size)
+        QTimer.singleShot(300, self._update_fov_overlay)
+        QTimer.singleShot(400, self._position_fov_overlay)
+
+    def _update_fov_overlay(self, *_):
+        """Refresh the bottom-left overlay text from the current FOV index."""
+        if not hasattr(self, "_fov_overlay_label"):
+            return
+        data = getattr(self, "_xarray_data", None)
+        if data is None or "fov" not in getattr(data, "dims", ()):
+            self._fov_overlay_label.setVisible(False)
+            return
+        try:
+            dm = self.ndv_viewer.display_model
+            idx = dm.current_index.get("fov", 0)
+        except Exception:
+            idx = 0
+        try:
+            coord = data.coords["fov"].values
+            label = str(coord[int(idx)]) if 0 <= int(idx) < len(coord) else str(idx)
+        except Exception:
+            label = str(idx)
+        self._fov_overlay_label.setText(f"FOV: {label}")
+        self._fov_overlay_label.adjustSize()
+        self._position_fov_overlay()
+
+    def _position_fov_overlay(self):
+        """Bottom-left placement, mirror of the scale bar's bottom-right."""
+        if not hasattr(self, "_fov_overlay_label"):
+            return
+        canvas = getattr(self, "_fov_overlay_canvas", None)
+        if canvas is None:
+            return
+        ch = canvas.height()
+        sh = self._fov_overlay_label.height()
+        self._fov_overlay_label.move(12, ch - sh - 12)
+        self._fov_overlay_label.raise_()
+
     def _connect_camera_events(self):
         """Connect to vispy camera transform events (deferred to ensure camera exists)."""
         try:
@@ -4202,11 +4291,12 @@ class LightweightViewer(QWidget):
         self._scale_bar_widget.raise_()
 
     def eventFilter(self, obj, event):
-        """Reposition scale bar when canvas is resized."""
+        """Reposition scale bar + FOV overlay when canvas is resized."""
         if obj is getattr(self, "_scale_bar_canvas", None):
             from PyQt5.QtCore import QEvent
             if event.type() == QEvent.Resize:
                 QTimer.singleShot(0, self._redraw_scale_bar)
+                QTimer.singleShot(0, self._position_fov_overlay)
         return super().eventFilter(obj, event)
 
     def _initiate_channel_label_update(self):
