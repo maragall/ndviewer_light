@@ -3666,14 +3666,19 @@ class LightweightViewer(QWidget):
             if pixel_size_um is None and sample is not None:
                 pixel_size_um = read_tiff_pixel_size(sample)
 
+            # Build human-readable FOV labels (e.g. "A1:0", "A1:1", "B2:0")
+            # so the ndv slider shows the well:index name instead of a bare
+            # integer. fovs is a list of {"region", "fov"} dicts.
+            fov_coords = [f"{f['region']}:{f['fov']}" for f in fovs]
             xarr = xr.DataArray(
                 stacked,
                 dims=["time", "fov", "z", "channel", "y", "x"],
-                # Use actual values for time/z coords, numeric indices for fov/channel.
-                # Channel names are stored in attrs and applied via _lut_controllers.
+                # Use actual values for time/z coords; FOV uses readable
+                # well:index labels (when meaningful regions exist) so the
+                # ndv slider displays "A1:0" rather than a bare index.
                 coords={
                     "time": times,
-                    "fov": list(range(n_fov)),
+                    "fov": fov_coords,
                     "z": z_levels,
                     "channel": list(range(n_c)),
                 },
@@ -3839,12 +3844,15 @@ class LightweightViewer(QWidget):
         stacked = da.moveaxis(stacked, 3, 2)  # Now (T, FOV, Z, C, Y, X)
 
         n_fov = len(fovs)
+        # Build readable FOV labels so the ndv slider shows the well:index
+        # name (e.g. "A1:0") rather than a bare integer.
+        fov_coords = [f"{f['region']}:{f['fov']}" for f in fovs]
         xarr = xr.DataArray(
             stacked,
             dims=["time", "fov", "z", "channel", "y", "x"],
             coords={
                 "time": list(range(n_t)),
-                "fov": list(range(n_fov)),
+                "fov": fov_coords,
                 "z": list(range(n_z)),
                 "channel": list(range(n_c)),
             },
