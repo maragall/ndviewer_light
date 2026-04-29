@@ -4167,16 +4167,17 @@ class LightweightViewer(QWidget):
         self._fov_overlay_label.setVisible(True)
         self._fov_overlay_label.raise_()
 
-        # Live updates: listen for ndv's current_index changes if available.
-        try:
-            dm = getattr(self.ndv_viewer, "display_model", None)
-            if dm is not None and hasattr(dm, "events"):
-                ev = getattr(dm.events, "current_index", None)
-                if ev is not None and not getattr(self, "_fov_overlay_connected", False):
-                    ev.connect(self._update_fov_overlay)
-                    self._fov_overlay_connected = True
-        except Exception:
-            pass
+        # Live updates via 10 Hz poll. display_model.events.current_index
+        # only fires when the WHOLE dict is replaced; ndv's sliders mutate
+        # items in place (current_index["fov"] = 5), so the field-level
+        # signal never reaches us. A timer is cheap (one int compare per
+        # tick) and survives ndv changing its container type.
+        if not hasattr(self, "_fov_overlay_timer"):
+            self._fov_overlay_timer = QTimer(self)
+            self._fov_overlay_timer.setInterval(100)
+            self._fov_overlay_timer.timeout.connect(self._update_fov_overlay)
+        self._fov_overlay_last_idx = None
+        self._fov_overlay_timer.start()
 
         # Initial paint + position (deferred so the canvas has its real size)
         QTimer.singleShot(300, self._update_fov_overlay)
@@ -4189,12 +4190,18 @@ class LightweightViewer(QWidget):
         data = getattr(self, "_xarray_data", None)
         if data is None or "fov" not in getattr(data, "dims", ()):
             self._fov_overlay_label.setVisible(False)
+            if hasattr(self, "_fov_overlay_timer"):
+                self._fov_overlay_timer.stop()
             return
         try:
             dm = self.ndv_viewer.display_model
             idx = dm.current_index.get("fov", 0)
         except Exception:
             idx = 0
+        # Skip work if nothing changed since the last tick.
+        if idx == getattr(self, "_fov_overlay_last_idx", None):
+            return
+        self._fov_overlay_last_idx = idx
         try:
             coord = data.coords["fov"].values
             label = str(coord[int(idx)]) if 0 <= int(idx) < len(coord) else str(idx)
