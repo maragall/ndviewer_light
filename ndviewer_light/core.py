@@ -81,6 +81,10 @@ import tensorstore as ts
 
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
+# Non-TIFF raster formats decoded via Pillow (e.g. Squid BMP acquisitions).
+PIL_EXTENSIONS = {".bmp", ".png", ".jpg", ".jpeg"}
+# All single-image formats the single-file reader can ingest.
+IMAGE_EXTENSIONS = TIFF_EXTENSIONS | PIL_EXTENSIONS
 LIVE_REFRESH_INTERVAL_MS = 750
 SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
 ZARR_LOAD_DEBOUNCE_MS = 200  # Debounce interval for zarr frame loading
@@ -529,9 +533,31 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(
-    r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.tiff?", re.IGNORECASE
+    r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.(?:tiff?|bmp|png|jpe?g)",
+    re.IGNORECASE,
 )
 FPATTERN_OME = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)\.ome\.tiff?", re.IGNORECASE)
+
+
+def decode_image_plane(filepath: str) -> np.ndarray:
+    """Read a single 2-D image plane from a TIFF or Pillow-supported file.
+
+    TIFF/OME-TIFF is read via tifffile; BMP/PNG/JPEG via Pillow. Multi-channel
+    or paletted images are collapsed to single-channel grayscale ("L") so the
+    reader always yields a 2-D array. The file's native dtype is preserved.
+    """
+    ext = Path(filepath).suffix.lower()
+    if ext in TIFF_EXTENSIONS:
+        with tf.TiffFile(filepath) as tif:
+            return tif.pages[0].asarray()
+    from PIL import Image
+
+    with Image.open(filepath) as im:
+        # Keep native single-channel/high-bit-depth modes; collapse colour and
+        # paletted images to grayscale so downstream shape/dtype stay 2-D.
+        if im.mode not in ("L", "I", "I;16", "I;16B", "I;16L", "F"):
+            im = im.convert("L")
+        return np.asarray(im)
 
 
 # Helper functions
@@ -3283,7 +3309,9 @@ class LightweightViewer(QWidget):
                 None,
             )
             if first_tp:
-                for f in first_tp.glob("*.tiff"):
+                for f in first_tp.iterdir():
+                    if f.suffix.lower() not in IMAGE_EXTENSIONS:
+                        continue
                     if m := FPATTERN.search(f.name):
                         fov_set.add((m.group("r"), int(m.group("f"))))
 
@@ -3453,7 +3481,7 @@ class LightweightViewer(QWidget):
                 # This prevents showing black images for empty/incomplete timepoints
                 has_files = False
                 for f in tp_dir.iterdir():
-                    if f.suffix.lower() not in TIFF_EXTENSIONS:
+                    if f.suffix.lower() not in IMAGE_EXTENSIONS:
                         continue
                     if m := FPATTERN.search(f.name):
                         region, fov = m.group("r"), int(m.group("f"))
@@ -3482,17 +3510,18 @@ class LightweightViewer(QWidget):
                 (
                     p
                     for p in file_index.values()
-                    if Path(p).suffix.lower() in TIFF_EXTENSIONS
+                    if Path(p).suffix.lower() in IMAGE_EXTENSIONS
                 ),
                 None,
             )
             if sample is None:
                 return None
             try:
-                with tf.TiffFile(sample) as tif:
-                    height, width = tif.pages[0].shape[-2:]
+                sample_plane = decode_image_plane(sample)
+                height, width = sample_plane.shape[-2:]
+                plane_dtype = sample_plane.dtype
             except Exception as e:
-                logger.debug("Failed to read sample TIFF: %s", e)
+                logger.debug("Failed to read sample image: %s", e)
                 return None
 
             luts = {
@@ -3504,15 +3533,14 @@ class LightweightViewer(QWidget):
             def load_plane(t, region, fov, z, channel):
                 filepath = file_index.get((t, region, fov, z, channel))
                 if not filepath:
-                    return np.zeros((height, width), dtype=np.uint16)
+                    return np.zeros((height, width), dtype=plane_dtype)
                 try:
-                    ext = Path(filepath).suffix.lower()
-                    if ext in TIFF_EXTENSIONS:
-                        with tf.TiffFile(filepath) as tif:
-                            return tif.pages[0].asarray()
+                    return decode_image_plane(filepath).astype(
+                        plane_dtype, copy=False
+                    )
                 except Exception as e:
                     logger.debug("Failed to load plane %s: %s", filepath, e)
-                return np.zeros((height, width), dtype=np.uint16)
+                return np.zeros((height, width), dtype=plane_dtype)
 
             # Build on-demand loader via map_blocks over a dummy array
             chunks = (
@@ -3535,17 +3563,24 @@ class LightweightViewer(QWidget):
                 return plane.reshape(1, 1, 1, 1, height, width)
 
             dummy = da.zeros(
-                (n_t, n_fov, n_z, n_c, height, width), chunks=chunks, dtype=np.uint16
+                (n_t, n_fov, n_z, n_c, height, width),
+                chunks=chunks,
+                dtype=plane_dtype,
             )
             stacked = da.map_blocks(
-                _block_loader, dummy, dtype=np.uint16, chunks=chunks
+                _block_loader, dummy, dtype=plane_dtype, chunks=chunks
             )
 
             # Read acquisition parameters for pixel size and dz
             pixel_size_um, dz_um = read_acquisition_parameters(base_path)
 
             # Fallback: try reading pixel size from TIFF metadata tags
-            if pixel_size_um is None and sample is not None:
+            # (TIFF-only; BMP/PNG/JPEG carry no usable resolution tags here).
+            if (
+                pixel_size_um is None
+                and sample is not None
+                and Path(sample).suffix.lower() in TIFF_EXTENSIONS
+            ):
                 pixel_size_um = read_tiff_pixel_size(sample)
 
             xarr = xr.DataArray(
