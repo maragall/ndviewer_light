@@ -31,6 +31,9 @@ ndviewer-light = "ndviewer_light.core:main"
 where = ["."]
 include = ["ndviewer_light"]
 
+[tool.setuptools.package-data]
+ndviewer_light = ["*.svg"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 

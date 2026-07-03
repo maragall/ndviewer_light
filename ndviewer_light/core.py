@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -1362,14 +1362,33 @@ def _apply_dark_theme(widget: QWidget) -> None:
     widget.setPalette(p)
 
 
+def _set_cephla_icon(window: QMainWindow) -> None:
+    """Set the Cephla logo as window icon."""
+    try:
+        from PyQt5.QtSvg import QSvgRenderer
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            renderer = QSvgRenderer(str(logo_path))
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            window.setWindowIcon(QIcon(pixmap))
+    except ImportError:
+        pass
+
+
 class LauncherWindow(QMainWindow):
     """Separate launcher window with dropbox for dataset selection."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NDViewer Lightweight - Open Dataset")
+        self.setWindowTitle("Cephla NDViewer Lightweight - Open Dataset")
         self.setGeometry(100, 100, 400, 300)  # 4:3 aspect, narrower
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         central = QWidget()
         layout = QVBoxLayout()
@@ -1402,6 +1421,39 @@ class LauncherWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
         self.status_label.setAlignment(Qt.AlignCenter)
         # layout.addWidget(self.status_label) # hide status label
+
+        # Subtle branding — logo + text
+        brand_widget = QWidget()
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(0, 0, 0, 4)
+        brand_layout.setSpacing(6)
+        brand_layout.addStretch()
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            try:
+                from PyQt5.QtSvg import QSvgRenderer
+
+                logo_label = QLabel()
+                renderer = QSvgRenderer(str(logo_path))
+                pm = QPixmap(14, 14)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                p.setOpacity(80 / 255)
+                renderer.render(p)
+                p.end()
+                logo_label.setPixmap(pm)
+                brand_layout.addWidget(logo_label)
+            except ImportError:
+                pass
+
+        brand_text = QLabel("cephla")
+        brand_text.setStyleSheet(
+            "color: rgba(49, 196, 243, 80); font-size: 10px; letter-spacing: 3px;"
+        )
+        brand_layout.addWidget(brand_text)
+        brand_layout.addStretch()
+        layout.addWidget(brand_widget)
 
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -4034,9 +4086,10 @@ class LightweightMainWindow(QMainWindow):
 
     def __init__(self, dataset_path: str):
         super().__init__()
-        self.setWindowTitle(f"NDViewer Lightweight - {Path(dataset_path).name}")
+        self.setWindowTitle(f"Cephla NDViewer Lightweight - {Path(dataset_path).name}")
         self.setGeometry(100, 100, 720, 540)  # 4:3 aspect, smaller
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         self.viewer = LightweightViewer(dataset_path)
         self.setCentralWidget(self.viewer)
