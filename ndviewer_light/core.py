@@ -3535,9 +3535,7 @@ class LightweightViewer(QWidget):
                 if not filepath:
                     return np.zeros((height, width), dtype=plane_dtype)
                 try:
-                    return decode_image_plane(filepath).astype(
-                        plane_dtype, copy=False
-                    )
+                    return decode_image_plane(filepath).astype(plane_dtype, copy=False)
                 except Exception as e:
                     logger.debug("Failed to load plane %s: %s", filepath, e)
                 return np.zeros((height, width), dtype=plane_dtype)

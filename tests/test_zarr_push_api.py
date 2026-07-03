@@ -109,7 +109,11 @@ class TestZarrMetadataIntegration:
 
     def test_channel_colors_to_luts(self):
         """Test converting channel colors to LUTs."""
-        from ndviewer_light import extract_wavelength, hex_to_colormap, wavelength_to_colormap
+        from ndviewer_light import (
+            extract_wavelength,
+            hex_to_colormap,
+            wavelength_to_colormap,
+        )
 
         channel_names = ["DAPI", "GFP", "RFP"]
         channel_colors = ["0000FF", "00FF00", "FF0000"]

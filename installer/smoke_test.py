@@ -1,4 +1,5 @@
 """Post-freeze smoke tests for the bundled ndviewer_light application."""
+
 import os
 import sys
 import tempfile
@@ -34,10 +35,12 @@ def run():
 
     def t_dask_array():
         import dask.array
+
         assert dask.array.zeros((10, 10)).compute().shape == (10, 10)
 
     def t_tifffile():
         import tifffile
+
         arr = numpy.zeros((10, 10), dtype=numpy.uint16)
         with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as f:
             path = f.name
@@ -56,6 +59,7 @@ def run():
 
     def t_scipy_ndimage():
         from scipy.ndimage import zoom
+
         result = zoom(numpy.ones((10, 10)), 0.5)
         assert result.shape == (5, 5)
 
