@@ -2,6 +2,7 @@
 
 Each test is independent so failures pinpoint the exact missing package.
 """
+
 import pytest
 
 
@@ -68,3 +69,8 @@ def test_import_opengl():
 
 def test_import_pyqt5():
     from PyQt5.QtWidgets import QApplication  # noqa: F401
+
+
+def test_import_pil():
+    # Used by core.decode_image_plane for BMP/PNG/JPEG acquisitions.
+    from PIL import Image  # noqa: F401

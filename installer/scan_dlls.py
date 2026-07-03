@@ -8,34 +8,88 @@ import sys
 
 
 SYSTEM_DLLS = {
-    "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll",
-    "shell32.dll", "ole32.dll", "oleaut32.dll", "comctl32.dll",
-    "comdlg32.dll", "ws2_32.dll", "wsock32.dll", "ntdll.dll",
-    "msvcrt.dll", "ucrtbase.dll", "bcrypt.dll", "crypt32.dll",
-    "secur32.dll", "winspool.drv", "shlwapi.dll", "rpcrt4.dll",
-    "imm32.dll", "winmm.dll", "version.dll", "netapi32.dll",
-    "userenv.dll", "setupapi.dll", "cfgmgr32.dll", "powrprof.dll",
-    "mswsock.dll", "iphlpapi.dll", "wldap32.dll", "normaliz.dll",
-    "dnsapi.dll", "dbghelp.dll", "psapi.dll", "pdh.dll",
-    "vcruntime140.dll", "vcruntime140_1.dll",
-    "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-    "concrt140.dll", "vcomp140.dll",
-    "ucrtbased.dll", "vcruntime140d.dll",
-    "opengl32.dll", "glu32.dll", "d3d11.dll", "dxgi.dll",
-    "dwmapi.dll", "uxtheme.dll", "propsys.dll", "shcore.dll",
-    "wtsapi32.dll", "ncrypt.dll",
-    "bcryptprimitives.dll", "d3d9.dll", "imagehlp.dll", "mpr.dll",
-    "d3d11.dll", "dxgi.dll", "d3d12.dll", "dxcore.dll",
-    "oleacc.dll", "uiautomationcore.dll", "credui.dll",
-    "cryptui.dll", "wevtapi.dll", "cabinet.dll",
-    "d2d1.dll", "dwrite.dll", "winhttp.dll", "wininet.dll",
+    "kernel32.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "advapi32.dll",
+    "shell32.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "comctl32.dll",
+    "comdlg32.dll",
+    "ws2_32.dll",
+    "wsock32.dll",
+    "ntdll.dll",
+    "msvcrt.dll",
+    "ucrtbase.dll",
+    "bcrypt.dll",
+    "crypt32.dll",
+    "secur32.dll",
+    "winspool.drv",
+    "shlwapi.dll",
+    "rpcrt4.dll",
+    "imm32.dll",
+    "winmm.dll",
+    "version.dll",
+    "netapi32.dll",
+    "userenv.dll",
+    "setupapi.dll",
+    "cfgmgr32.dll",
+    "powrprof.dll",
+    "mswsock.dll",
+    "iphlpapi.dll",
+    "wldap32.dll",
+    "normaliz.dll",
+    "dnsapi.dll",
+    "dbghelp.dll",
+    "psapi.dll",
+    "pdh.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "concrt140.dll",
+    "vcomp140.dll",
+    "ucrtbased.dll",
+    "vcruntime140d.dll",
+    "opengl32.dll",
+    "glu32.dll",
+    "d3d11.dll",
+    "dxgi.dll",
+    "dwmapi.dll",
+    "uxtheme.dll",
+    "propsys.dll",
+    "shcore.dll",
+    "wtsapi32.dll",
+    "ncrypt.dll",
+    "bcryptprimitives.dll",
+    "d3d9.dll",
+    "imagehlp.dll",
+    "mpr.dll",
+    "d3d11.dll",
+    "dxgi.dll",
+    "d3d12.dll",
+    "dxcore.dll",
+    "oleacc.dll",
+    "uiautomationcore.dll",
+    "credui.dll",
+    "cryptui.dll",
+    "wevtapi.dll",
+    "cabinet.dll",
+    "d2d1.dll",
+    "dwrite.dll",
+    "winhttp.dll",
+    "wininet.dll",
     "webservices.dll",
 }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Scan dist folder for missing DLLs")
-    parser.add_argument("dist_dir", help="Path to dist/<appname>/_internal or dist/<appname>")
+    parser.add_argument(
+        "dist_dir", help="Path to dist/<appname>/_internal or dist/<appname>"
+    )
     args = parser.parse_args()
 
     try:
@@ -47,9 +101,8 @@ def main():
     dist_dir = args.dist_dir
 
     # Collect all .pyd and .dll files
-    files = (
-        glob.glob(os.path.join(dist_dir, "**/*.pyd"), recursive=True)
-        + glob.glob(os.path.join(dist_dir, "**/*.dll"), recursive=True)
+    files = glob.glob(os.path.join(dist_dir, "**/*.pyd"), recursive=True) + glob.glob(
+        os.path.join(dist_dir, "**/*.dll"), recursive=True
     )
 
     if not files:
