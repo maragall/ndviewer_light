@@ -74,3 +74,8 @@ def test_import_pyqt5():
 def test_import_pil():
     # Used by core.decode_image_plane for BMP/PNG/JPEG acquisitions.
     from PIL import Image  # noqa: F401
+
+
+def test_import_qtsvg():
+    # Used by core._set_cephla_icon and the launcher brand strip.
+    from PyQt5.QtSvg import QSvgRenderer  # noqa: F401

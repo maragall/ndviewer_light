@@ -23,11 +23,14 @@ a = Analysis(
     ['entry.py'],
     pathex=[os.path.abspath('..')],
     binaries=[],
-    datas=vispy_datas,
+    datas=vispy_datas + [
+        (os.path.join('..', 'ndviewer_light', 'cephla_logo.svg'), 'ndviewer_light'),
+    ],
     hiddenimports=ndviewer_light_imports + ndv_imports + vispy_imports + cmap_imports + psygnal_imports + [
         'PyQt5',
         'PyQt5.QtCore',
         'PyQt5.QtGui',
+        'PyQt5.QtSvg',
         'PyQt5.QtWidgets',
         'superqt',
         'superqt.sliders',
