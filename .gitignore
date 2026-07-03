@@ -4,6 +4,4 @@ __pycache__/
 .DS_Store
 .claude/
 .coverage
-
-
-ndviewer_light.egg-info/
+*.egg-info/

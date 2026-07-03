@@ -449,10 +449,12 @@ class _PlaneLoader:
             return cached
 
         with self.lock:
-            filepath = self.file_index.get(cache_key)
+            entry = self.file_index.get(cache_key)
 
-        if not filepath:
+        if entry is None:
             return np.zeros((self.height, self.width), dtype=np.uint16)
+
+        filepath, page_idx = entry
 
         if not self.load_from_disk:
             self.disk_reads += 1
@@ -460,7 +462,7 @@ class _PlaneLoader:
 
         try:
             with self._tf.TiffFile(filepath) as tif:
-                plane = tif.pages[0].asarray()
+                plane = tif.pages[page_idx].asarray()
                 self.cache.put(cache_key, plane)
                 self.disk_reads += 1
                 return plane
@@ -485,7 +487,7 @@ class TestLoadSinglePlane:
     def test_load_single_plane_returns_zeros_on_file_not_found(self):
         """_load_single_plane returns zeros when file doesn't exist."""
         loader = _PlaneLoader(height=100, width=100, load_from_disk=True)
-        loader.file_index[(0, 0, 0, "BF")] = "/nonexistent/path/image.tiff"
+        loader.file_index[(0, 0, 0, "BF")] = ("/nonexistent/path/image.tiff", 0)
 
         result = loader.load(0, 0, 0, "BF")
 
@@ -508,7 +510,7 @@ class TestLoadSinglePlane:
             test_image = np.random.randint(0, 65535, (50, 50), dtype=np.uint16)
             tf.imwrite(temp_path, test_image)
 
-            loader.file_index[(0, 0, 0, "BF")] = temp_path
+            loader.file_index[(0, 0, 0, "BF")] = (temp_path, 0)
             result = loader.load(0, 0, 0, "BF")
 
             assert result.shape == (50, 50)
@@ -519,6 +521,191 @@ class TestLoadSinglePlane:
             assert cached is not None
             assert np.array_equal(cached, test_image)
 
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_loads_specific_page(self):
+        """_load_single_plane reads the correct page from a multi-page TIFF."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write a multi-page TIFF with 3 distinct pages
+            pages = [
+                np.full((50, 50), fill_value=i * 1000, dtype=np.uint16)
+                for i in range(3)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # Read page 0
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_path, 0)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch0"), pages[0])
+
+            # Read page 2
+            loader.file_index[(0, 0, 0, "Ch2")] = (temp_path, 2)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch2"), pages[2])
+
+            # Read page 1
+            loader.file_index[(0, 0, 0, "Ch1")] = (temp_path, 1)
+            assert np.array_equal(loader.load(0, 0, 0, "Ch1"), pages[1])
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_returns_zeros_on_out_of_range_page(self):
+        """_load_single_plane returns zeros when page_idx is out of range."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            # Write a single-page TIFF
+            test_image = np.ones((50, 50), dtype=np.uint16) * 42
+            tf.imwrite(temp_path, test_image)
+
+            # Request page 5 (out of range)
+            loader.file_index[(0, 0, 0, "BF")] = (temp_path, 5)
+            result = loader.load(0, 0, 0, "BF")
+
+            assert result.shape == (50, 50)
+            assert result.dtype == np.uint16
+            assert np.all(result == 0)
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_page0_of_multipage_file(self):
+        """_load_single_plane correctly reads page 0 from a multi-page TIFF."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            pages = [
+                np.full((50, 50), fill_value=i * 100, dtype=np.uint16) for i in range(4)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # page_idx=0 should still read the correct first page
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_path, 0)
+            result = loader.load(0, 0, 0, "Ch0")
+            assert np.array_equal(result, pages[0])
+        finally:
+            os.unlink(temp_path)
+
+    def test_load_single_plane_multiple_files_different_pages(self):
+        """_load_single_plane reads correct pages from different files."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+        temp_paths = []
+
+        try:
+            # Create two multi-page TIFFs with distinct data
+            for file_idx in range(2):
+                with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+                    temp_paths.append(f.name)
+                pages = [
+                    np.full(
+                        (50, 50), fill_value=(file_idx + 1) * 1000 + i, dtype=np.uint16
+                    )
+                    for i in range(3)
+                ]
+                with tf.TiffWriter(temp_paths[-1]) as tw:
+                    for page in pages:
+                        tw.write(page)
+
+            # Read page 2 from file 0, page 1 from file 1
+            loader.file_index[(0, 0, 0, "Ch0")] = (temp_paths[0], 2)
+            loader.file_index[(0, 0, 0, "Ch1")] = (temp_paths[1], 1)
+
+            r0 = loader.load(0, 0, 0, "Ch0")
+            r1 = loader.load(0, 0, 0, "Ch1")
+
+            assert np.all(r0 == 1002)  # file 0, page 2
+            assert np.all(r1 == 2001)  # file 1, page 1
+        finally:
+            for p in temp_paths:
+                os.unlink(p)
+
+    def test_negative_page_idx_rejected(self):
+        """Negative page_idx should be rejected by register_image().
+
+        Tests the validation added to register_image(). Requires the
+        version from this repo (not an older editable install).
+        """
+        import inspect as _inspect
+
+        from ndviewer_light.core import LightweightViewer
+
+        sig = _inspect.signature(LightweightViewer.register_image)
+        assert "page_idx" in sig.parameters, (
+            "LightweightViewer.register_image is missing 'page_idx' parameter. "
+            "Tests may be running against an outdated ndviewer_light install."
+        )
+
+        import pytest
+
+        dummy = type(
+            "_D", (), {"_file_index": {}, "_file_index_lock": threading.Lock()}
+        )()
+        with pytest.raises((ValueError, TypeError)):
+            LightweightViewer.register_image(dummy, 0, 0, 0, "BF", "/fake.tiff", -1)
+
+    def test_load_single_plane_concurrent_different_channels(self):
+        """_load_single_plane handles concurrent reads of different channels."""
+        import tifffile as tf
+
+        loader = _PlaneLoader(height=50, width=50, load_from_disk=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+            temp_path = f.name
+
+        try:
+            pages = [
+                np.full((50, 50), fill_value=i * 500, dtype=np.uint16) for i in range(6)
+            ]
+            with tf.TiffWriter(temp_path) as tw:
+                for page in pages:
+                    tw.write(page)
+
+            # Register all 6 channels pointing to same file, different pages
+            for i in range(6):
+                loader.file_index[(0, 0, 0, f"Ch{i}")] = (temp_path, i)
+
+            # Load all concurrently from threads
+            results = [None] * 6
+            errors = []
+
+            def load_channel(idx):
+                try:
+                    results[idx] = loader.load(0, 0, 0, f"Ch{idx}")
+                except Exception as e:
+                    errors.append(e)
+
+            threads = [
+                threading.Thread(target=load_channel, args=(i,)) for i in range(6)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"Concurrent loads failed: {errors}"
+            for i in range(6):
+                assert np.all(results[i] == i * 500), f"Channel {i} has wrong data"
         finally:
             os.unlink(temp_path)
 
@@ -534,6 +721,143 @@ class TestLoadSinglePlane:
 
         assert np.array_equal(result, cached_image)
         assert loader.disk_reads == 0  # No disk read occurred
+
+
+class TestLRUHandleCache:
+    """Tests for the TiffFile handle LRU cache."""
+
+    def test_cache_stays_bounded_under_stress(self):
+        """Handle cache does not exceed max size with many files."""
+        import tifffile as tf
+
+        from ndviewer_light.core import LightweightViewer
+
+        viewer = LightweightViewer.__new__(LightweightViewer)
+        viewer._tiff_handles = __import__("collections").OrderedDict()
+        viewer._tiff_handles_lock = threading.Lock()
+        viewer._tiff_handles_max = 8  # Small limit for fast test
+        viewer._file_index = {}
+        viewer._file_index_lock = threading.Lock()
+        viewer._plane_cache = __import__(
+            "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]
+        ).MemoryBoundedLRUCache(max_memory_bytes=64 * 1024 * 1024)
+        viewer._image_height = 32
+        viewer._image_width = 32
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            # Create 20 multi-page TIFFs (more than cache max of 8)
+            for fov in range(20):
+                path = os.path.join(tmpdir, f"fov{fov}.tiff")
+                with tf.TiffWriter(path) as tw:
+                    for c in range(3):
+                        tw.write(
+                            np.full((32, 32), fill_value=fov * 100 + c, dtype=np.uint16)
+                        )
+                for c in range(3):
+                    viewer.register_image(
+                        t=0,
+                        fov_idx=fov,
+                        z=0,
+                        channel=f"Ch{c}",
+                        filepath=path,
+                        page_idx=c,
+                    )
+
+            # Force loading planes from all 20 files
+            for fov in range(20):
+                for c in range(3):
+                    viewer._load_single_plane(0, fov, 0, f"Ch{c}")
+
+            assert (
+                len(viewer._tiff_handles) <= viewer._tiff_handles_max
+            ), f"Cache size {len(viewer._tiff_handles)} exceeds max {viewer._tiff_handles_max}"
+        finally:
+            # Clean up handles
+            for tif, _ in viewer._tiff_handles.values():
+                try:
+                    tif.close()
+                except Exception:
+                    pass
+            viewer._tiff_handles.clear()
+            import shutil
+
+            shutil.rmtree(tmpdir)
+
+    def test_concurrent_register_and_load(self):
+        """Concurrent registration and loading does not corrupt state."""
+        import tifffile as tf
+
+        from ndviewer_light.core import LightweightViewer
+
+        viewer = LightweightViewer.__new__(LightweightViewer)
+        viewer._tiff_handles = __import__("collections").OrderedDict()
+        viewer._tiff_handles_lock = threading.Lock()
+        viewer._tiff_handles_max = 128
+        viewer._file_index = {}
+        viewer._file_index_lock = threading.Lock()
+        viewer._plane_cache = __import__(
+            "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]
+        ).MemoryBoundedLRUCache(max_memory_bytes=64 * 1024 * 1024)
+        viewer._image_height = 32
+        viewer._image_width = 32
+
+        n_fovs = 20
+        n_channels = 4
+        tmpdir = tempfile.mkdtemp()
+        errors = []
+
+        try:
+            # Pre-create files
+            paths = []
+            for fov in range(n_fovs):
+                path = os.path.join(tmpdir, f"fov{fov}.tiff")
+                paths.append(path)
+                with tf.TiffWriter(path) as tw:
+                    for c in range(n_channels):
+                        tw.write(
+                            np.full((32, 32), fill_value=fov * 100 + c, dtype=np.uint16)
+                        )
+
+            def worker(fov_start, fov_end):
+                try:
+                    for fov in range(fov_start, fov_end):
+                        for c in range(n_channels):
+                            viewer.register_image(
+                                t=0,
+                                fov_idx=fov,
+                                z=0,
+                                channel=f"Ch{c}",
+                                filepath=paths[fov],
+                                page_idx=c,
+                            )
+                            viewer._load_single_plane(0, fov, 0, f"Ch{c}")
+                except Exception as e:
+                    errors.append(e)
+
+            threads = []
+            chunk = n_fovs // 4
+            for i in range(4):
+                start = i * chunk
+                end = start + chunk if i < 3 else n_fovs
+                t = threading.Thread(target=worker, args=(start, end))
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert not errors, f"Concurrent ops failed: {errors}"
+            assert len(viewer._file_index) == n_fovs * n_channels
+        finally:
+            for tif, _ in viewer._tiff_handles.values():
+                try:
+                    tif.close()
+                except Exception:
+                    pass
+            viewer._tiff_handles.clear()
+            import shutil
+
+            shutil.rmtree(tmpdir)
 
 
 def _format_fov_label(fov_labels, value):

@@ -912,6 +912,25 @@ def detect_zarr_version(path: Path) -> Optional[int]:
     return None
 
 
+class _TensorStoreArrayWrapper:
+    """Thin wrapper around a tensorstore array exposing numpy-compatible dtype.
+
+    Dask's ``from_array`` calls ``np.dtype(arr.dtype)`` internally, which fails
+    with tensorstore's own dtype objects.  This wrapper delegates all indexing
+    to the underlying tensorstore array while reporting a plain numpy dtype so
+    that dask can build its task graph without errors.
+    """
+
+    def __init__(self, ts_array):
+        self._arr = ts_array
+        self.shape = tuple(ts_array.shape)
+        self.dtype = np.dtype(ts_array.dtype.numpy_dtype)
+        self.ndim = len(ts_array.shape)
+
+    def __getitem__(self, idx):
+        return np.asarray(self._arr[idx].read().result())
+
+
 def open_zarr_tensorstore(path: Path, array_path: str = "0") -> Optional[Any]:
     """Open a zarr store using tensorstore, auto-detecting v2/v3 format.
 
@@ -1442,8 +1461,16 @@ class LightweightViewer(QWidget):
 
         # External navigation state (push-based API for live acquisition)
         # _file_index is accessed from both main thread and dask workers, needs lock
-        self._file_index: Dict[tuple, str] = {}  # (t, fov_idx, z, channel) -> filepath
+        # (t, fov_idx, z, channel) -> (filepath, page_idx)
+        self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
+        # LRU cache of open TiffFile handles to avoid re-parsing IFD chains.
+        # Each entry is (TiffFile, per-file Lock) so reads to different files
+        # proceed in parallel while same-file reads are serialized.
+        # Bounded to avoid fd exhaustion with thousands of files.
+        self._tiff_handles: OrderedDict = OrderedDict()  # filepath -> (tif, lock)
+        self._tiff_handles_lock = threading.Lock()  # protects the dict itself
+        self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
@@ -1571,6 +1598,9 @@ class LightweightViewer(QWidget):
         fov_layout.addWidget(self._fov_play_btn)
         fov_layout.addWidget(self._fov_label)
         fov_layout.addWidget(self._fov_slider)
+        self._fov_slider_container.setVisible(
+            False
+        )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
         layout.addWidget(slider_container)
@@ -1729,6 +1759,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         with self._file_index_lock:
             self._file_index.clear()
+        self._close_tiff_handle_cache()
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
 
@@ -1807,7 +1838,15 @@ class LightweightViewer(QWidget):
         self._xarray_data = xarr
         self._set_ndv_data(xarr)
 
-    def register_image(self, t: int, fov_idx: int, z: int, channel: str, filepath: str):
+    def register_image(
+        self,
+        t: int,
+        fov_idx: int,
+        z: int,
+        channel: str,
+        filepath: str,
+        page_idx: int = 0,
+    ):
         """Register a newly saved image file.
 
         Thread-safe: can be called from worker thread.
@@ -1819,10 +1858,15 @@ class LightweightViewer(QWidget):
             z: Z-level index
             channel: Channel name
             filepath: Path to the saved TIFF file
+            page_idx: Page index within the TIFF file (default 0).
+                For OME-TIFF stacks that store multiple planes per file,
+                specify which page to read.
         """
+        if page_idx < 0:
+            raise ValueError(f"page_idx must be >= 0, got {page_idx}")
         # Update file index (protected by lock for dask worker thread safety)
         with self._file_index_lock:
-            self._file_index[(t, fov_idx, z, channel)] = filepath
+            self._file_index[(t, fov_idx, z, channel)] = (filepath, page_idx)
 
         # Emit signal with raw indices - main thread computes max values
         # to avoid race condition on _max_time_idx
@@ -1995,29 +2039,71 @@ class LightweightViewer(QWidget):
 
         # Load from file (lock protects concurrent access from dask workers)
         with self._file_index_lock:
-            filepath = self._file_index.get(cache_key)
+            entry = self._file_index.get(cache_key)
 
-        if not filepath:
+        if entry is None:
             # File not yet registered - expected during acquisition, not an error
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
+
+        filepath, page_idx = entry
 
         if not LAZY_LOADING_AVAILABLE:
             logger.error("tifffile not available for loading image planes")
             return np.zeros((self._image_height, self._image_width), dtype=np.uint16)
 
         try:
-            with tf.TiffFile(filepath) as tif:
-                plane = tif.pages[0].asarray()
-                self._plane_cache.put(cache_key, plane)
-                return plane
+            # Look up or create a cached (TiffFile, Lock) entry.
+            # Global lock is held only for dict bookkeeping; the per-file
+            # lock serializes reads to the same file while allowing parallel
+            # reads across different files.
+            evicted_entries = []
+            with self._tiff_handles_lock:
+                entry = self._tiff_handles.get(filepath)
+                if entry is not None:
+                    tif, file_lock = entry
+                    self._tiff_handles.move_to_end(filepath)
+                else:
+                    tif = tf.TiffFile(filepath)
+                    file_lock = threading.Lock()
+                    self._tiff_handles[filepath] = (tif, file_lock)
+                    # Evict LRU handles if over limit
+                    while len(self._tiff_handles) > self._tiff_handles_max:
+                        _, evicted = self._tiff_handles.popitem(last=False)
+                        evicted_entries.append(evicted)
+            # Close evicted handles.  Safe because LRU eviction only removes
+            # the oldest entry, which the current thread just moved away from
+            # (move_to_end).  For another thread to hold a reference to the
+            # evicted entry, 128+ new files would need to open in the
+            # microseconds between its lookup and file_lock acquire.
+            for old_tif, old_lock in evicted_entries:
+                with old_lock:
+                    self._close_tiff_handles([old_tif])
+            # Read page under per-file lock
+            with file_lock:
+                plane = tif.pages[page_idx].asarray()
+            self._plane_cache.put(cache_key, plane)
+            return plane
         except FileNotFoundError:
             logger.warning("Image file not found (may have been deleted): %s", filepath)
+        except IndexError:
+            # Evict stale entry so next lookup re-opens the file and sees
+            # newly appended pages.  Don't close the handle here — another
+            # thread may still hold a reference and be about to read.  The
+            # handle will be closed at end_acquisition() / closeEvent().
+            with self._tiff_handles_lock:
+                self._tiff_handles.pop(filepath, None)
+            logger.warning(
+                "Page %d not available in %s (file may still be writing)",
+                page_idx,
+                filepath,
+            )
         except PermissionError as e:
             logger.error("Permission denied reading image %s: %s", filepath, e)
         except Exception as e:
             logger.error(
-                "Failed to load image plane %s (t=%d, fov=%d, z=%d, ch=%s): %s",
+                "Failed to load image plane %s page %d (t=%d, fov=%d, z=%d, ch=%s): %s",
                 filepath,
+                page_idx,
                 t,
                 fov_idx,
                 z,
@@ -2119,6 +2205,7 @@ class LightweightViewer(QWidget):
         self._acquisition_active = False
         # NOTE: _fov_labels is NOT cleared here - navigation must still work
         # after acquisition ends. Labels are cleared in start_acquisition().
+        self._close_tiff_handle_cache()
         logger.info("NDViewer: Acquisition ended")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2755,6 +2842,16 @@ class LightweightViewer(QWidget):
         self._close_tiff_handles(getattr(self, "_open_handles", []))
         self._open_handles = []
 
+    def _close_tiff_handle_cache(self):
+        """Close cached TiffFile handles used by push-based OME-TIFF loading."""
+        with self._tiff_handles_lock:
+            entries = list(self._tiff_handles.values())
+            self._tiff_handles.clear()
+        # Acquire each per-file lock before closing to wait for in-flight readers.
+        for tif, file_lock in entries:
+            with file_lock:
+                self._close_tiff_handles([tif])
+
     def closeEvent(self, event):
         """Clean up resources when the widget is closed."""
         if self._refresh_timer:
@@ -2781,6 +2878,7 @@ class LightweightViewer(QWidget):
         with self._zarr_written_planes_lock:
             self._zarr_written_planes.clear()
         self._close_open_handles()
+        self._close_tiff_handle_cache()
         super().closeEvent(event)
 
     def _force_refresh(self):
@@ -3581,11 +3679,12 @@ class LightweightViewer(QWidget):
                 if ts_arr is None:
                     raise RuntimeError(f"Could not open zarr store at {fov_path}")
 
-                # Create dask array with per-plane chunks
+                # Create dask array with per-plane chunks.
+                # Wrap tensorstore array so dask sees a numpy-compatible dtype.
                 chunks = tuple(
                     1 if i < len(shape) - 2 else s for i, s in enumerate(shape)
                 )
-                darr = da.from_array(ts_arr, chunks=chunks)
+                darr = da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
                 # Ensure shape is (T, C, Z, Y, X)
                 if len(darr.shape) == 4:
@@ -3702,9 +3801,10 @@ class LightweightViewer(QWidget):
             else:
                 luts[i] = wavelength_to_colormap(extract_wavelength(name))
 
-        # Create dask array with per-plane chunks using tensorstore array
+        # Create dask array with per-plane chunks using tensorstore array.
+        # Wrap tensorstore array so dask sees a numpy-compatible dtype.
         chunks = tuple(1 if i < len(shape) - 2 else s for i, s in enumerate(shape))
-        darr = da.from_array(ts_arr, chunks=chunks)
+        darr = da.from_array(_TensorStoreArrayWrapper(ts_arr), chunks=chunks)
 
         # Transpose to standard order: (time, fov, z, channel, y, x)
         # Build transpose order based on current axis order

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -22,6 +22,9 @@ dependencies = [
     "ndv>=0.4.0,<0.5.0",
     "pyconify",
 ]
+
+[project.scripts]
+ndviewer-light = "ndviewer_light.core:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
