@@ -25,6 +25,7 @@ from pathlib import Path
 # 1. Static import walk via modulefinder
 # ---------------------------------------------------------------------------
 
+
 def walk_imports(entry: Path, extra_paths: list[str]):
     """Return (found_modules, missing_modules) by tracing entry point."""
     search_path = [str(p) for p in extra_paths] + sys.path
@@ -41,6 +42,7 @@ def walk_imports(entry: Path, extra_paths: list[str]):
 # ---------------------------------------------------------------------------
 # 2. AST-based conditional import detection
 # ---------------------------------------------------------------------------
+
 
 def _imports_in_node(node):
     """Yield module names from Import / ImportFrom nodes."""
@@ -75,6 +77,7 @@ def find_conditional_imports(source_files: list[Path]):
 # 3. Parse .spec file for hiddenimports / excludes
 # ---------------------------------------------------------------------------
 
+
 def parse_spec(spec_path: Path):
     """Extract hiddenimports and excludes lists from a .spec file.
 
@@ -104,10 +107,13 @@ def parse_spec(spec_path: Path):
         items = re.findall(r"['\"]([^'\"]+)['\"]", value_expr)
 
         # Also resolve collect_submodules('pkg') calls if possible
-        for pkg_match in re.finditer(r"collect_submodules\(['\"]([^'\"]+)['\"]\)", text):
+        for pkg_match in re.finditer(
+            r"collect_submodules\(['\"]([^'\"]+)['\"]\)", text
+        ):
             pkg = pkg_match.group(1)
             try:
                 from PyInstaller.utils.hooks import collect_submodules
+
                 items.extend(collect_submodules(pkg))
             except Exception:
                 # If PyInstaller isn't available or pkg not installed,
@@ -146,6 +152,7 @@ def check_dll_risks(module_names: set[str]):
 # 5. Collect source files for AST scanning
 # ---------------------------------------------------------------------------
 
+
 def collect_source_files(extra_paths: list[Path]):
     """Collect .py files from the extra paths (project source dirs)."""
     sources = []
@@ -161,6 +168,7 @@ def collect_source_files(extra_paths: list[Path]):
 # ---------------------------------------------------------------------------
 # 6. Transitive dependency expansion for conditional imports
 # ---------------------------------------------------------------------------
+
 
 def trace_transitive(module_name: str, extra_paths: list[str], depth: int = 3):
     """Try to find what a conditional import would pull in transitively."""
@@ -180,11 +188,14 @@ def trace_transitive(module_name: str, extra_paths: list[str], depth: int = 3):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Static import walker for PyInstaller")
     parser.add_argument("--entry", required=True, help="Entry point script")
     parser.add_argument("--spec", required=False, help=".spec file to compare against")
-    parser.add_argument("--path", nargs="*", default=[], help="Extra search paths (like pathex)")
+    parser.add_argument(
+        "--path", nargs="*", default=[], help="Extra search paths (like pathex)"
+    )
     args = parser.parse_args()
 
     entry = Path(args.entry).resolve()
@@ -228,36 +239,94 @@ def main():
     # internal/build modules, and things PyInstaller handles automatically.
     IGNORE_MISSING = {
         # Platform-specific (Unix/VMS/Java/Windows)
-        "fcntl", "grp", "pwd", "posix", "resource", "termios", "readline",
-        "java", "java.lang", "vms_lib",
-        "msvcrt", "nt", "winreg",  # Windows-only stdlib
+        "fcntl",
+        "grp",
+        "pwd",
+        "posix",
+        "resource",
+        "termios",
+        "readline",
+        "java",
+        "java.lang",
+        "vms_lib",
+        "msvcrt",
+        "nt",
+        "winreg",  # Windows-only stdlib
         "org.python.core",  # Jython
-        "dummy", "dummy.Process",
+        "dummy",
+        "dummy.Process",
         # Stdlib subattrs that modulefinder misreports
-        "os.path", "collections.OrderedDict", "collections.defaultdict",
-        "collections.deque", "collections.namedtuple", "collections.Counter",
-        "collections.ChainMap", "collections.abc",
-        "re.compile", "re.escape", "re.sub", "re.IGNORECASE",
-        "asyncio.iscoroutinefunction", "http.HTTPStatus",
+        "os.path",
+        "collections.OrderedDict",
+        "collections.defaultdict",
+        "collections.deque",
+        "collections.namedtuple",
+        "collections.Counter",
+        "collections.ChainMap",
+        "collections.abc",
+        "re.compile",
+        "re.escape",
+        "re.sub",
+        "re.IGNORECASE",
+        "asyncio.iscoroutinefunction",
+        "http.HTTPStatus",
         "email.message_from_file",
-        "ctypes.Array", "ctypes.CDLL", "ctypes.Structure", "ctypes.Union",
-        "ctypes.c_char_p", "ctypes.c_ulong", "ctypes.c_void_p",
-        "ctypes.cdll", "ctypes.create_string_buffer", "ctypes.sizeof",
-        "multiprocessing.AuthenticationError", "multiprocessing.BufferTooShort",
-        "multiprocessing.TimeoutError", "multiprocessing.get_context",
-        "multiprocessing.get_start_method", "multiprocessing.set_start_method",
+        "ctypes.Array",
+        "ctypes.CDLL",
+        "ctypes.Structure",
+        "ctypes.Union",
+        "ctypes.c_char_p",
+        "ctypes.c_ulong",
+        "ctypes.c_void_p",
+        "ctypes.cdll",
+        "ctypes.create_string_buffer",
+        "ctypes.sizeof",
+        "multiprocessing.AuthenticationError",
+        "multiprocessing.BufferTooShort",
+        "multiprocessing.TimeoutError",
+        "multiprocessing.get_context",
+        "multiprocessing.get_start_method",
+        "multiprocessing.set_start_method",
         # Build/test infrastructure (not needed at runtime)
-        "distutils", "distutils.filelist", "test.support._force_run",
+        "distutils",
+        "distutils.filelist",
+        "test.support._force_run",
         "packaging.licenses.canonicalize_license_expression",
-        "PyInstaller", "pefile",
+        "PyInstaller",
+        "pefile",
     }
     # Stdlib top-level modules that PyInstaller bundles automatically
     STDLIB_AUTO = {
-        "sys", "os", "re", "json", "gc", "shutil", "time", "subprocess",
-        "tempfile", "traceback", "warnings", "functools", "collections",
-        "ctypes", "asyncio", "http", "email", "xml", "importlib",
-        "unittest", "pathlib", "threading", "logging", "typing",
-        "io", "math", "struct", "hashlib", "base64", "copy",
+        "sys",
+        "os",
+        "re",
+        "json",
+        "gc",
+        "shutil",
+        "time",
+        "subprocess",
+        "tempfile",
+        "traceback",
+        "warnings",
+        "functools",
+        "collections",
+        "ctypes",
+        "asyncio",
+        "http",
+        "email",
+        "xml",
+        "importlib",
+        "unittest",
+        "pathlib",
+        "threading",
+        "logging",
+        "typing",
+        "io",
+        "math",
+        "struct",
+        "hashlib",
+        "base64",
+        "copy",
     }
     actionable_missing = set()
     for m in missing:
@@ -281,8 +350,14 @@ def main():
             spec = importlib.util.find_spec(top)
         except (ValueError, ModuleNotFoundError):
             continue
-        if spec and spec.origin and ("site-packages" in str(spec.origin) or
-                                      any(str(p) in str(spec.origin) for p in extra_paths)):
+        if (
+            spec
+            and spec.origin
+            and (
+                "site-packages" in str(spec.origin)
+                or any(str(p) in str(spec.origin) for p in extra_paths)
+            )
+        ):
             found_not_hidden.add(m)
 
     # 3. DLL risks
@@ -321,7 +396,9 @@ def main():
         # Only show top-level unique packages
         top_pkgs = sorted({m.split(".")[0] for m in found_not_hidden} - hidden_set)
         if top_pkgs:
-            print(f"\nFOUND but not in hiddenimports ({len(top_pkgs)} top-level packages):")
+            print(
+                f"\nFOUND but not in hiddenimports ({len(top_pkgs)} top-level packages):"
+            )
             for p in top_pkgs[:30]:
                 print(f"  - {p}")
             if len(top_pkgs) > 30:

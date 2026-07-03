@@ -63,8 +63,12 @@ def is_system_lib(name):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scan dist folder for missing .so dependencies")
-    parser.add_argument("dist_dir", help="Path to dist/<appname>/ or dist/<appname>/_internal")
+    parser = argparse.ArgumentParser(
+        description="Scan dist folder for missing .so dependencies"
+    )
+    parser.add_argument(
+        "dist_dir", help="Path to dist/<appname>/ or dist/<appname>/_internal"
+    )
     args = parser.parse_args()
 
     dist_dir = args.dist_dir
@@ -104,7 +108,9 @@ def main():
         try:
             result = subprocess.run(
                 ["ldd", f],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
                 env=scan_env,
             )
             for line in result.stdout.splitlines():

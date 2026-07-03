@@ -1,4 +1,5 @@
 """Frozen entry point for PyInstaller-built ndviewer_light."""
+
 import os
 import sys
 import traceback
@@ -6,9 +7,7 @@ import traceback
 if getattr(sys, "frozen", False):
     _meipass = sys._MEIPASS
     if sys.platform == "win32":
-        os.environ["QT_PLUGIN_PATH"] = os.path.join(
-            _meipass, "PyQt5", "Qt5", "plugins"
-        )
+        os.environ["QT_PLUGIN_PATH"] = os.path.join(_meipass, "PyQt5", "Qt5", "plugins")
     else:
         # Linux: set both plugin paths + LD_LIBRARY_PATH for bundled .so files
         qt_plugins = os.path.join(_meipass, "PyQt5", "Qt5", "plugins")
@@ -24,10 +23,12 @@ if getattr(sys, "frozen", False):
 
 if "--smoke-test" in sys.argv:
     from installer.smoke_test import run
+
     run()
 else:
     try:
         from ndviewer_light.core import main
+
         main()
     except Exception:
         tb = traceback.format_exc()
