@@ -1666,21 +1666,39 @@ class LightweightViewer(QWidget):
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
 
-    def _on_time_play_clicked(self, checked: bool):
-        """Handle time play button click."""
+    def _toggle_play_animation(
+        self,
+        timer: Optional[QTimer],
+        button: QPushButton,
+        step_cb,
+        checked: bool,
+    ) -> Optional[QTimer]:
+        """Start or stop a slider play animation.
+
+        Returns the (possibly newly created) timer so the caller can rebind
+        its instance attribute — a parameter cannot rebind the caller's
+        self._X_play_timer.
+        """
         if checked:
             # Update text for fallback (iconify handles icon automatically)
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("⏸")
-            if self._time_play_timer is None:
-                self._time_play_timer = QTimer(self)
-                self._time_play_timer.timeout.connect(self._time_play_step)
-            self._time_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+                button.setText("⏸")
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(step_cb)
+            timer.start(SLIDER_PLAY_INTERVAL_MS)
         else:
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("▶")
-            if self._time_play_timer:
-                self._time_play_timer.stop()
+                button.setText("▶")
+            if timer:
+                timer.stop()
+        return timer
+
+    def _on_time_play_clicked(self, checked: bool):
+        """Handle time play button click."""
+        self._time_play_timer = self._toggle_play_animation(
+            self._time_play_timer, self._time_play_btn, self._time_play_step, checked
+        )
 
     def _time_play_step(self):
         """Advance time slider by one step (looping)."""
@@ -1693,18 +1711,9 @@ class LightweightViewer(QWidget):
 
     def _on_fov_play_clicked(self, checked: bool):
         """Handle FOV play button click."""
-        if checked:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("⏸")
-            if self._fov_play_timer is None:
-                self._fov_play_timer = QTimer(self)
-                self._fov_play_timer.timeout.connect(self._fov_play_step)
-            self._fov_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
-        else:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("▶")
-            if self._fov_play_timer:
-                self._fov_play_timer.stop()
+        self._fov_play_timer = self._toggle_play_animation(
+            self._fov_play_timer, self._fov_play_btn, self._fov_play_step, checked
+        )
 
     def _fov_play_step(self):
         """Advance FOV slider by one step (looping)."""
