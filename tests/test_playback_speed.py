@@ -1,8 +1,8 @@
-"""Tests for slider playback: play buttons and playback speed.
+"""Tests for slider playback: play buttons and playback speed (IMA-190).
 
-Characterization tests that pin the current play-button behavior so the
-playback refactor and speed-control feature (IMA-190) land on a green
-baseline.
+Covers the play-button timer lifecycle, the fps→interval conversion, the
+user-facing speed control (default 5 fps, range 1–10, shared by both play
+buttons), live retiming of running playback, and speed-control visibility.
 
 Follows the house pattern: no QApplication / pytest-qt. ViewerDouble
 inherits the real playback methods from LightweightViewer but skips Qt
@@ -24,12 +24,37 @@ class ViewerDouble(LightweightViewer):
     """Real playback methods, mocked collaborators, no Qt construction."""
 
     def __init__(self):  # deliberately does NOT call super().__init__()
+        self._playback_fps = core.DEFAULT_PLAYBACK_FPS
         self._time_play_timer = None
         self._fov_play_timer = None
         self._time_play_btn = MagicMock()
         self._fov_play_btn = MagicMock()
         self._time_slider = MagicMock()
         self._fov_slider = MagicMock()
+        self._time_container = MagicMock()
+        self._fov_slider_container = MagicMock()
+        self._speed_container = MagicMock()
+
+
+class TestFpsToInterval:
+    """fps → QTimer interval conversion."""
+
+    def test_default_fps_is_slower_than_old_hardcoded_10fps(self):
+        # IMA-190 acceptance criterion 2: default slower than 10 fps.
+        assert core.DEFAULT_PLAYBACK_FPS < 10
+        assert core.DEFAULT_PLAYBACK_FPS == 5
+
+    def test_range_constants(self):
+        assert core.PLAYBACK_FPS_MIN == 1
+        assert core.PLAYBACK_FPS_MAX == 10
+
+    def test_conversion_values(self):
+        assert core._fps_to_interval_ms(1) == 1000
+        assert core._fps_to_interval_ms(5) == 200
+        assert core._fps_to_interval_ms(10) == 100
+
+    def test_zero_fps_clamped_no_division_error(self):
+        assert core._fps_to_interval_ms(0) == 1000
 
 
 class TestTimePlayButton:
@@ -43,7 +68,7 @@ class TestTimePlayButton:
         timer_cls.assert_called_once_with(viewer)
         assert viewer._time_play_timer is timer_cls.return_value
         viewer._time_play_timer.timeout.connect.assert_called_once()
-        viewer._time_play_timer.start.assert_called_once_with(100)
+        viewer._time_play_timer.start.assert_called_once_with(200)
 
     def test_play_connects_timer_to_time_step(self):
         viewer = ViewerDouble()
@@ -63,7 +88,7 @@ class TestTimePlayButton:
         timer_cls.assert_not_called()
         assert viewer._time_play_timer is existing
         existing.timeout.connect.assert_not_called()
-        existing.start.assert_called_once_with(100)
+        existing.start.assert_called_once_with(200)
 
     def test_pause_stops_timer(self):
         viewer = ViewerDouble()
@@ -110,7 +135,7 @@ class TestFovPlayButton:
 
         timer_cls.assert_called_once_with(viewer)
         assert viewer._fov_play_timer is timer_cls.return_value
-        viewer._fov_play_timer.start.assert_called_once_with(100)
+        viewer._fov_play_timer.start.assert_called_once_with(200)
 
     def test_play_connects_timer_to_fov_step(self):
         viewer = ViewerDouble()
@@ -134,8 +159,8 @@ class TestFovPlayButton:
             viewer._on_fov_play_clicked(True)
 
         assert viewer._time_play_timer is not viewer._fov_play_timer
-        viewer._time_play_timer.start.assert_called_once_with(100)
-        viewer._fov_play_timer.start.assert_called_once_with(100)
+        viewer._time_play_timer.start.assert_called_once_with(200)
+        viewer._fov_play_timer.start.assert_called_once_with(200)
 
 
 class TestPlayStep:
@@ -208,3 +233,114 @@ class TestStopPlayAnimation:
     def test_none_timer_is_noop(self):
         viewer = ViewerDouble()
         viewer._stop_play_animation(None, MagicMock())  # must not raise
+
+
+class TestPlaybackSpeed:
+    """The IMA-190 speed control: both play buttons honor the stored fps."""
+
+    def test_time_play_honors_custom_fps(self):
+        viewer = ViewerDouble()
+        viewer._playback_fps = 2
+        with patch.object(core, "QTimer") as timer_cls:
+            viewer._on_time_play_clicked(True)
+
+        timer_cls.return_value.start.assert_called_once_with(500)
+
+    def test_fov_play_honors_custom_fps(self):
+        viewer = ViewerDouble()
+        viewer._playback_fps = 10
+        with patch.object(core, "QTimer") as timer_cls:
+            viewer._on_fov_play_clicked(True)
+
+        timer_cls.return_value.start.assert_called_once_with(100)
+
+
+class TestPlaybackFpsChanged:
+    """Live-apply: changing fps retimes any running playback immediately."""
+
+    def _timer(self, active: bool) -> MagicMock:
+        timer = MagicMock()
+        timer.isActive.return_value = active
+        return timer
+
+    def test_stores_fps(self):
+        viewer = ViewerDouble()
+        viewer._on_playback_fps_changed(3)
+        assert viewer._playback_fps == 3
+
+    def test_retimes_active_time_timer(self):
+        viewer = ViewerDouble()
+        viewer._time_play_timer = self._timer(active=True)
+        viewer._on_playback_fps_changed(2)
+
+        viewer._time_play_timer.setInterval.assert_called_once_with(500)
+
+    def test_retimes_both_timers_when_both_active(self):
+        viewer = ViewerDouble()
+        viewer._time_play_timer = self._timer(active=True)
+        viewer._fov_play_timer = self._timer(active=True)
+        viewer._on_playback_fps_changed(4)
+
+        viewer._time_play_timer.setInterval.assert_called_once_with(250)
+        viewer._fov_play_timer.setInterval.assert_called_once_with(250)
+
+    def test_inactive_timer_untouched(self):
+        viewer = ViewerDouble()
+        viewer._time_play_timer = self._timer(active=False)
+        viewer._on_playback_fps_changed(2)
+
+        viewer._time_play_timer.setInterval.assert_not_called()
+        assert viewer._playback_fps == 2  # still stored for the next play
+
+    def test_no_timers_created_yet_is_noop(self):
+        viewer = ViewerDouble()
+        viewer._on_playback_fps_changed(7)  # must not raise
+        assert viewer._playback_fps == 7
+
+    def test_next_play_uses_updated_fps(self):
+        viewer = ViewerDouble()
+        viewer._on_playback_fps_changed(1)
+        with patch.object(core, "QTimer") as timer_cls:
+            viewer._on_time_play_clicked(True)
+
+        timer_cls.return_value.start.assert_called_once_with(1000)
+
+
+class TestSpeedControlVisibility:
+    """Speed control shows iff either slider row is shown."""
+
+    def _set_rows(self, viewer, time_hidden: bool, fov_hidden: bool):
+        viewer._time_container.isHidden.return_value = time_hidden
+        viewer._fov_slider_container.isHidden.return_value = fov_hidden
+
+    def test_hidden_when_both_rows_hidden(self):
+        viewer = ViewerDouble()
+        self._set_rows(viewer, time_hidden=True, fov_hidden=True)
+        viewer._update_speed_control_visibility()
+
+        viewer._speed_container.setVisible.assert_called_once_with(False)
+
+    def test_shown_when_time_row_visible(self):
+        viewer = ViewerDouble()
+        self._set_rows(viewer, time_hidden=False, fov_hidden=True)
+        viewer._update_speed_control_visibility()
+
+        viewer._speed_container.setVisible.assert_called_once_with(True)
+
+    def test_shown_when_only_fov_row_visible(self):
+        # FOV-only dataset (single timepoint): control must stay reachable.
+        viewer = ViewerDouble()
+        self._set_rows(viewer, time_hidden=True, fov_hidden=False)
+        viewer._update_speed_control_visibility()
+
+        viewer._speed_container.setVisible.assert_called_once_with(True)
+
+    def test_fov_visibility_update_also_updates_speed_control(self):
+        viewer = ViewerDouble()
+        viewer._fov_labels = ["A1:0", "A1:1"]
+        viewer._updating_sliders = False
+        self._set_rows(viewer, time_hidden=True, fov_hidden=False)
+        viewer._update_fov_slider_visibility()
+
+        viewer._fov_slider_container.setVisible.assert_called_once_with(True)
+        viewer._speed_container.setVisible.assert_called_once_with(True)
