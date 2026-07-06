@@ -40,7 +40,7 @@ jobs:
         shell: bash -l {0}
         run: |
           conda activate ndviewer_light
-          pip install pytest
+          pip install pytest PyOpenGL
           pip install -e .
 
       - name: Install system dependencies for Qt

@@ -3,6 +3,7 @@
 Runs headless (offscreen). Tests actual dataset loading, viewer creation,
 dimension navigation, and channel switching against real test data.
 """
+
 import os
 import sys
 import time
@@ -38,6 +39,7 @@ def run_test(name, fn):
 
 def main():
     from PyQt5.QtWidgets import QApplication
+
     app = QApplication(sys.argv)
 
     from ndviewer_light.core import (
@@ -60,6 +62,7 @@ def main():
     # --- Test 2: detect_format on each dataset ---
     if os.path.isdir(TEST_DATA):
         from pathlib import Path
+
         for name in sorted(os.listdir(TEST_DATA)):
             d = os.path.join(TEST_DATA, name)
             if not os.path.isdir(d) or name.startswith("."):
@@ -124,6 +127,7 @@ def main():
             t0 = os.path.join(tmpdir, "0")
             os.makedirs(t0)
             import tifffile
+
             for i in range(3):
                 arr = np.random.randint(0, 1000, (64, 64), dtype=np.uint16)
                 tifffile.imwrite(
@@ -136,14 +140,29 @@ def main():
                     f.write(f"A1,{i*0.9},{0.0},\n")
             # Write minimal acquisition params
             import json
+
             with open(os.path.join(tmpdir, "acquisition parameters.json"), "w") as f:
-                json.dump({
-                    "dx(mm)": 0.9, "Nx": 1, "dy(mm)": 0.9, "Ny": 1,
-                    "dz(um)": 1.5, "Nz": 1, "dt(s)": 0, "Nt": 1,
-                    "objective": {"magnification": 10, "NA": 0.3,
-                                  "tube_lens_f_mm": 180, "name": "10x"},
-                    "sensor_pixel_size_um": 6.5, "tube_lens_mm": 180
-                }, f)
+                json.dump(
+                    {
+                        "dx(mm)": 0.9,
+                        "Nx": 1,
+                        "dy(mm)": 0.9,
+                        "Ny": 1,
+                        "dz(um)": 1.5,
+                        "Nz": 1,
+                        "dt(s)": 0,
+                        "Nt": 1,
+                        "objective": {
+                            "magnification": 10,
+                            "NA": 0.3,
+                            "tube_lens_f_mm": 180,
+                            "name": "10x",
+                        },
+                        "sensor_pixel_size_um": 6.5,
+                        "tube_lens_mm": 180,
+                    },
+                    f,
+                )
 
             w = LightweightMainWindow(tmpdir)
             w.show()
@@ -159,6 +178,7 @@ def main():
     def test_fov_list():
         from ndviewer_light.core import LightweightViewer
         from unittest.mock import MagicMock
+
         mock = MagicMock(spec=LightweightViewer)
         mock.dataset_path = None
         mock.get_fov_list = lambda: LightweightViewer.get_fov_list(mock)
@@ -172,6 +192,7 @@ def main():
     def test_data_structure():
         from ndviewer_light.core import data_structure_changed
         import xarray as xr
+
         d1 = xr.DataArray(np.zeros((2, 10, 10)), dims=["c", "y", "x"])
         d2 = xr.DataArray(np.zeros((3, 10, 10)), dims=["c", "y", "x"])
         assert data_structure_changed(d2, d1) is True

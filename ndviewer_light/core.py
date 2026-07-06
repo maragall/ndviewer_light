@@ -16,7 +16,15 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPalette
+from PyQt5.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPixmap,
+)
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -24,6 +32,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QStyleFactory,
     QVBoxLayout,
     QWidget,
@@ -94,13 +103,24 @@ import tensorstore as ts
 
 # Constants
 TIFF_EXTENSIONS = {".tif", ".tiff"}
+# Non-TIFF raster formats decoded via Pillow (e.g. Squid BMP acquisitions).
+PIL_EXTENSIONS = {".bmp", ".png", ".jpg", ".jpeg"}
+# All single-image formats the single-file reader can ingest.
+IMAGE_EXTENSIONS = TIFF_EXTENSIONS | PIL_EXTENSIONS
 LIVE_REFRESH_INTERVAL_MS = 750
-SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
+DEFAULT_PLAYBACK_FPS = 5  # Default play-button animation rate (IMA-190)
+PLAYBACK_FPS_MIN = 1
+PLAYBACK_FPS_MAX = 10
 ZARR_LOAD_DEBOUNCE_MS = 200  # Debounce interval for zarr frame loading
 PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
 PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
+
+
+def _fps_to_interval_ms(fps: int) -> int:
+    """Convert a playback rate in fps to a QTimer interval in milliseconds."""
+    return round(1000 / max(1, fps))
 
 
 def _create_play_button(parent=None) -> QPushButton:
@@ -542,9 +562,31 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
 
 # Filename patterns (from common.py)
 FPATTERN = re.compile(
-    r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.tiff?", re.IGNORECASE
+    r"(?P<r>[^_]+)_(?P<f>\d+)_(?P<z>\d+)_(?P<c>.+)\.(?:tiff?|bmp|png|jpe?g)",
+    re.IGNORECASE,
 )
 FPATTERN_OME = re.compile(r"(?P<r>[^_]+)_(?P<f>\d+)\.ome\.tiff?", re.IGNORECASE)
+
+
+def decode_image_plane(filepath: str) -> np.ndarray:
+    """Read a single 2-D image plane from a TIFF or Pillow-supported file.
+
+    TIFF/OME-TIFF is read via tifffile; BMP/PNG/JPEG via Pillow. Multi-channel
+    or paletted images are collapsed to single-channel grayscale ("L") so the
+    reader always yields a 2-D array. The file's native dtype is preserved.
+    """
+    ext = Path(filepath).suffix.lower()
+    if ext in TIFF_EXTENSIONS:
+        with tf.TiffFile(filepath) as tif:
+            return tif.pages[0].asarray()
+    from PIL import Image
+
+    with Image.open(filepath) as im:
+        # Keep native single-channel/high-bit-depth modes; collapse colour and
+        # paletted images to grayscale so downstream shape/dtype stay 2-D.
+        if im.mode not in ("L", "I", "I;16", "I;16B", "I;16L", "F"):
+            im = im.convert("L")
+        return np.asarray(im)
 
 
 # Helper functions
@@ -1349,14 +1391,33 @@ def _apply_dark_theme(widget: QWidget) -> None:
     widget.setPalette(p)
 
 
+def _set_cephla_icon(window: QMainWindow) -> None:
+    """Set the Cephla logo as window icon."""
+    try:
+        from PyQt5.QtSvg import QSvgRenderer
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            renderer = QSvgRenderer(str(logo_path))
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            window.setWindowIcon(QIcon(pixmap))
+    except ImportError:
+        pass
+
+
 class LauncherWindow(QMainWindow):
     """Separate launcher window with dropbox for dataset selection."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NDViewer Lightweight - Open Dataset")
+        self.setWindowTitle("Cephla NDViewer Lightweight - Open Dataset")
         self.setGeometry(100, 100, 400, 300)  # 4:3 aspect, narrower
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         central = QWidget()
         layout = QVBoxLayout()
@@ -1389,6 +1450,39 @@ class LauncherWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
         self.status_label.setAlignment(Qt.AlignCenter)
         # layout.addWidget(self.status_label) # hide status label
+
+        # Subtle branding — logo + text
+        brand_widget = QWidget()
+        brand_layout = QHBoxLayout(brand_widget)
+        brand_layout.setContentsMargins(0, 0, 0, 4)
+        brand_layout.setSpacing(6)
+        brand_layout.addStretch()
+
+        logo_path = Path(__file__).parent / "cephla_logo.svg"
+        if logo_path.exists():
+            try:
+                from PyQt5.QtSvg import QSvgRenderer
+
+                logo_label = QLabel()
+                renderer = QSvgRenderer(str(logo_path))
+                pm = QPixmap(14, 14)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                p.setOpacity(80 / 255)
+                renderer.render(p)
+                p.end()
+                logo_label.setPixmap(pm)
+                brand_layout.addWidget(logo_label)
+            except ImportError:
+                pass
+
+        brand_text = QLabel("cephla")
+        brand_text.setStyleSheet(
+            "color: rgba(49, 196, 243, 80); font-size: 10px; letter-spacing: 3px;"
+        )
+        brand_layout.addWidget(brand_text)
+        brand_layout.addStretch()
+        layout.addWidget(brand_widget)
 
         central.setLayout(layout)
         self.setCentralWidget(central)
@@ -1497,6 +1591,7 @@ class LightweightViewer(QWidget):
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
+        self._playback_fps: int = DEFAULT_PLAYBACK_FPS  # Shared by both play buttons
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
         self._load_debounce_timer: Optional[QTimer] = (
@@ -1614,6 +1709,23 @@ class LightweightViewer(QWidget):
         )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
+        # Playback speed control, shared by both play buttons (IMA-190).
+        # Fixed right-aligned slot; visible whenever either slider row is.
+        self._speed_container = QWidget()
+        speed_layout = QHBoxLayout(self._speed_container)
+        speed_layout.setContentsMargins(0, 0, 0, 0)
+        speed_layout.setSpacing(5)
+        speed_layout.addStretch(1)
+        self._speed_spinbox = QSpinBox()
+        self._speed_spinbox.setRange(PLAYBACK_FPS_MIN, PLAYBACK_FPS_MAX)
+        self._speed_spinbox.setValue(self._playback_fps)
+        self._speed_spinbox.setSuffix(" fps")
+        self._speed_spinbox.setToolTip("Playback speed for the play buttons")
+        self._speed_spinbox.valueChanged.connect(self._on_playback_fps_changed)
+        speed_layout.addWidget(self._speed_spinbox)
+        self._speed_container.setVisible(False)  # Hidden until a slider row shows
+        slider_layout.addWidget(self._speed_container)
+
         # Both labels share one fixed width so the T and FOV sliders align.
         # rangeChanged re-syncs the width whenever a slider maximum grows
         # (live acquisition); label-list changes call the sync directly.
@@ -1705,22 +1817,60 @@ class LightweightViewer(QWidget):
         """Show/hide FOV slider based on number of FOVs."""
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
+        self._update_speed_control_visibility()
 
-    def _on_time_play_clicked(self, checked: bool):
-        """Handle time play button click."""
+    def _update_speed_control_visibility(self):
+        """Show the playback speed control when either slider row is shown.
+
+        Uses isHidden() (explicit-hide state) rather than isVisible() so the
+        intent survives a hidden ancestor (e.g. during construction).
+        """
+        self._speed_container.setVisible(
+            not self._time_container.isHidden()
+            or not self._fov_slider_container.isHidden()
+        )
+
+    def _on_playback_fps_changed(self, fps: int):
+        """Handle playback speed change; retime any active play timers."""
+        self._playback_fps = fps
+        interval_ms = _fps_to_interval_ms(fps)
+        for timer in (self._time_play_timer, self._fov_play_timer):
+            if timer is not None and timer.isActive():
+                timer.setInterval(interval_ms)
+
+    def _toggle_play_animation(
+        self,
+        timer: Optional[QTimer],
+        button: QPushButton,
+        step_cb,
+        checked: bool,
+    ) -> Optional[QTimer]:
+        """Start or stop a slider play animation.
+
+        Returns the (possibly newly created) timer so the caller can rebind
+        its instance attribute — a parameter cannot rebind the caller's
+        self._X_play_timer.
+        """
         if checked:
             # Update text for fallback (iconify handles icon automatically)
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("⏸")
-            if self._time_play_timer is None:
-                self._time_play_timer = QTimer(self)
-                self._time_play_timer.timeout.connect(self._time_play_step)
-            self._time_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+                button.setText("⏸")
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(step_cb)
+            timer.start(_fps_to_interval_ms(self._playback_fps))
         else:
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("▶")
-            if self._time_play_timer:
-                self._time_play_timer.stop()
+                button.setText("▶")
+            if timer:
+                timer.stop()
+        return timer
+
+    def _on_time_play_clicked(self, checked: bool):
+        """Handle time play button click."""
+        self._time_play_timer = self._toggle_play_animation(
+            self._time_play_timer, self._time_play_btn, self._time_play_step, checked
+        )
 
     def _time_play_step(self):
         """Advance time slider by one step (looping)."""
@@ -1733,18 +1883,9 @@ class LightweightViewer(QWidget):
 
     def _on_fov_play_clicked(self, checked: bool):
         """Handle FOV play button click."""
-        if checked:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("⏸")
-            if self._fov_play_timer is None:
-                self._fov_play_timer = QTimer(self)
-                self._fov_play_timer.timeout.connect(self._fov_play_step)
-            self._fov_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
-        else:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("▶")
-            if self._fov_play_timer:
-                self._fov_play_timer.stop()
+        self._fov_play_timer = self._toggle_play_animation(
+            self._fov_play_timer, self._fov_play_btn, self._fov_play_step, checked
+        )
 
     def _fov_play_step(self):
         """Advance FOV slider by one step (looping)."""
@@ -1947,6 +2088,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
@@ -2600,6 +2742,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
@@ -3326,7 +3469,9 @@ class LightweightViewer(QWidget):
                 None,
             )
             if first_tp:
-                for f in first_tp.glob("*.tiff"):
+                for f in first_tp.iterdir():
+                    if f.suffix.lower() not in IMAGE_EXTENSIONS:
+                        continue
                     if m := FPATTERN.search(f.name):
                         fov_set.add((m.group("r"), int(m.group("f"))))
 
@@ -3496,7 +3641,7 @@ class LightweightViewer(QWidget):
                 # This prevents showing black images for empty/incomplete timepoints
                 has_files = False
                 for f in tp_dir.iterdir():
-                    if f.suffix.lower() not in TIFF_EXTENSIONS:
+                    if f.suffix.lower() not in IMAGE_EXTENSIONS:
                         continue
                     if m := FPATTERN.search(f.name):
                         region, fov = m.group("r"), int(m.group("f"))
@@ -3525,17 +3670,18 @@ class LightweightViewer(QWidget):
                 (
                     p
                     for p in file_index.values()
-                    if Path(p).suffix.lower() in TIFF_EXTENSIONS
+                    if Path(p).suffix.lower() in IMAGE_EXTENSIONS
                 ),
                 None,
             )
             if sample is None:
                 return None
             try:
-                with tf.TiffFile(sample) as tif:
-                    height, width = tif.pages[0].shape[-2:]
+                sample_plane = decode_image_plane(sample)
+                height, width = sample_plane.shape[-2:]
+                plane_dtype = sample_plane.dtype
             except Exception as e:
-                logger.debug("Failed to read sample TIFF: %s", e)
+                logger.debug("Failed to read sample image: %s", e)
                 return None
 
             luts = {
@@ -3547,15 +3693,12 @@ class LightweightViewer(QWidget):
             def load_plane(t, region, fov, z, channel):
                 filepath = file_index.get((t, region, fov, z, channel))
                 if not filepath:
-                    return np.zeros((height, width), dtype=np.uint16)
+                    return np.zeros((height, width), dtype=plane_dtype)
                 try:
-                    ext = Path(filepath).suffix.lower()
-                    if ext in TIFF_EXTENSIONS:
-                        with tf.TiffFile(filepath) as tif:
-                            return tif.pages[0].asarray()
+                    return decode_image_plane(filepath).astype(plane_dtype, copy=False)
                 except Exception as e:
                     logger.debug("Failed to load plane %s: %s", filepath, e)
-                return np.zeros((height, width), dtype=np.uint16)
+                return np.zeros((height, width), dtype=plane_dtype)
 
             # Build on-demand loader via map_blocks over a dummy array
             chunks = (
@@ -3578,17 +3721,24 @@ class LightweightViewer(QWidget):
                 return plane.reshape(1, 1, 1, 1, height, width)
 
             dummy = da.zeros(
-                (n_t, n_fov, n_z, n_c, height, width), chunks=chunks, dtype=np.uint16
+                (n_t, n_fov, n_z, n_c, height, width),
+                chunks=chunks,
+                dtype=plane_dtype,
             )
             stacked = da.map_blocks(
-                _block_loader, dummy, dtype=np.uint16, chunks=chunks
+                _block_loader, dummy, dtype=plane_dtype, chunks=chunks
             )
 
             # Read acquisition parameters for pixel size and dz
             pixel_size_um, dz_um = read_acquisition_parameters(base_path)
 
             # Fallback: try reading pixel size from TIFF metadata tags
-            if pixel_size_um is None and sample is not None:
+            # (TIFF-only; BMP/PNG/JPEG carry no usable resolution tags here).
+            if (
+                pixel_size_um is None
+                and sample is not None
+                and Path(sample).suffix.lower() in TIFF_EXTENSIONS
+            ):
                 pixel_size_um = read_tiff_pixel_size(sample)
 
             xarr = xr.DataArray(
@@ -4044,9 +4194,10 @@ class LightweightMainWindow(QMainWindow):
 
     def __init__(self, dataset_path: str):
         super().__init__()
-        self.setWindowTitle(f"NDViewer Lightweight - {Path(dataset_path).name}")
+        self.setWindowTitle(f"Cephla NDViewer Lightweight - {Path(dataset_path).name}")
         self.setGeometry(100, 100, 720, 540)  # 4:3 aspect, smaller
         self._set_dark_theme()
+        _set_cephla_icon(self)
 
         self.viewer = LightweightViewer(dataset_path)
         self.setCentralWidget(self.viewer)
