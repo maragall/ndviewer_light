@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -47,8 +47,18 @@ except ImportError:
 
     SUPERQT_AVAILABLE = False
 
+# UI font sizes (px) — single source of truth for viewer/launcher text size
+# (IMA-179). Only text styled by this module scales with these; the embedded
+# ndv widget applies its own font stylesheets, which beat any ancestor rule
+# (see IMA-197). NOTE: superqt's SliderLabel computes its fixed size from font
+# metrics with no FontChange handler, so SLIDER_VALUE_FONT_SIZE_PX above the
+# platform default font size can clip the slider value text.
+UI_FONT_SIZE_PX = 14  # slider row labels, launcher drop label
+SLIDER_VALUE_FONT_SIZE_PX = 12  # superqt SliderLabel value text
+
 # NDV slider style (matches NDV's internal sliders)
-NDV_SLIDER_STYLE = """
+NDV_SLIDER_STYLE = (
+    """
 QSlider::groove:horizontal {
     height: 15px;
     background: qlineargradient(
@@ -70,9 +80,12 @@ QSlider::sub-page:horizontal {
         stop:1 rgba(100, 100, 100, 0.1)
     );
 }
-QLabel { font-size: 12px; }
-SliderLabel { font-size: 10px; }
 """
+    + f"""
+QLabel {{ font-size: {UI_FONT_SIZE_PX}px; }}
+SliderLabel {{ font-size: {SLIDER_VALUE_FONT_SIZE_PX}px; }}
+"""
+)
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -1352,19 +1365,19 @@ class LauncherWindow(QMainWindow):
         self.drop_label = QLabel("Drop folder here\nor click to open")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setStyleSheet(
-            """
-            QLabel {
+            f"""
+            QLabel {{
                 border: 2px dashed #666;
                 border-radius: 10px;
                 padding: 40px;
                 background: #2a2a2a;
                 color: #aaa;
-                font-size: 14px;
-            }
-            QLabel:hover {
+                font-size: {UI_FONT_SIZE_PX}px;
+            }}
+            QLabel:hover {{
                 border-color: #888;
                 background: #333;
-            }
+            }}
         """
         )
         self.drop_label.setMinimumHeight(150)
@@ -1563,7 +1576,6 @@ class LightweightViewer(QWidget):
         t_layout.setContentsMargins(0, 0, 0, 0)
         t_layout.setSpacing(5)
         self._time_label = QLabel("T")
-        self._time_label.setFixedWidth(30)
         self._time_play_btn = _create_play_button(self)
         self._time_play_btn.clicked.connect(self._on_time_play_clicked)
         if SUPERQT_AVAILABLE:
@@ -1585,7 +1597,6 @@ class LightweightViewer(QWidget):
         fov_layout.setContentsMargins(0, 0, 0, 0)
         fov_layout.setSpacing(5)
         self._fov_label = QLabel("FOV")
-        self._fov_label.setFixedWidth(30)
         self._fov_play_btn = _create_play_button(self)
         self._fov_play_btn.clicked.connect(self._on_fov_play_clicked)
         if SUPERQT_AVAILABLE:
@@ -1603,9 +1614,38 @@ class LightweightViewer(QWidget):
         )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
+        # Both labels share one fixed width so the T and FOV sliders align.
+        # rangeChanged re-syncs the width whenever a slider maximum grows
+        # (live acquisition); label-list changes call the sync directly.
+        self._time_slider.rangeChanged.connect(self._sync_slider_label_widths)
+        self._fov_slider.rangeChanged.connect(self._sync_slider_label_widths)
+        self._sync_slider_label_widths()
+
         layout.addWidget(slider_container)
 
         self.setLayout(layout)
+
+    def _sync_slider_label_widths(self, *_) -> None:
+        """Give the T and FOV labels one shared fixed width so the sliders align.
+
+        Width is measured with an explicit QFont at UI_FONT_SIZE_PX because
+        stylesheet fonts only reach a widget's fontMetrics() after it is
+        polished (shown) — widget metrics are stale during setup. Every known
+        FOV label is measured (push-API labels arrive after setup) plus the
+        slider maxima, so the width never jumps while dragging a slider.
+        """
+        font = QFont(self._time_label.font())
+        font.setPixelSize(UI_FONT_SIZE_PX)
+        metrics = QFontMetrics(font)
+        candidates = [
+            "FOV: 999",  # floor: keeps near-empty datasets from a cramped layout
+            f"T: {self._time_slider.maximum()}",
+            f"FOV: {self._fov_slider.maximum()}",
+        ]
+        candidates += [f"FOV: {label}" for label in self._fov_labels]
+        width = max(metrics.horizontalAdvance(text) for text in candidates)
+        self._time_label.setFixedWidth(width)
+        self._fov_label.setFixedWidth(width)
 
     def _on_time_slider_changed(self, value: int):
         """Handle time slider change."""
@@ -1769,6 +1809,7 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
+        self._sync_slider_label_widths()
 
         # Set up LUTs based on channel wavelengths
         self._luts = {
@@ -2281,6 +2322,7 @@ class LightweightViewer(QWidget):
             fov_paths = list(fov_paths)[:min_len]
             fov_labels = list(fov_labels)[:min_len]
             self._fov_labels = fov_labels
+        self._sync_slider_label_widths()
         self._zarr_fov_paths = [Path(p) for p in fov_paths]
 
         # Build channel name to index map
@@ -2411,6 +2453,7 @@ class LightweightViewer(QWidget):
         ):
             for fov_in_region in range(n_fov):
                 self._fov_labels.append(f"{region_label}:{fov_in_region}")
+        self._sync_slider_label_widths()
         logger.info(
             f"6D regions mode: labels={self._fov_labels[:5]}..., paths={len(self._zarr_region_paths)}, fovs_per_region={self._fovs_per_region}, offsets={self._region_fov_offsets}"
         )
