@@ -1365,6 +1365,47 @@ def subset_fovs_per_region(fovs: List[Dict], n: int) -> List[Dict]:
     return [entry for entry in fovs if id(entry) in kept_ids]
 
 
+def parse_fov_label(label: str) -> Tuple[str, int]:
+    """Split a push-mode FOV label into (region, fov_index).
+
+    Labels are formatted ``"{region}:{fov}"`` (e.g. ``"A1:3"``). Falls back to
+    ``(label, 0)`` when there is no integer suffix.
+    """
+    region, sep, fov = label.rpartition(":")
+    if sep:
+        try:
+            return region, int(fov)
+        except ValueError:
+            pass
+    return label, 0
+
+
+def kept_fov_indices(fov_labels: List[str], n: int) -> List[int]:
+    """Flat indices into ``fov_labels`` kept under an "n per region" subset.
+
+    Push-mode counterpart of :func:`subset_fovs_per_region`. Regions are parsed
+    from the labels; within each region the ``n`` FOVs with the smallest integer
+    fov index are kept. Returns the kept flat indices in ascending order so the
+    slider can map contiguous positions onto them.
+
+    ``n <= 0`` returns every index (subset disabled / identity mapping), which
+    keeps the slider behaving exactly as it does without the subset.
+    """
+    if n <= 0:
+        return list(range(len(fov_labels)))
+
+    by_region: Dict[str, List[Tuple[int, int]]] = {}
+    for idx, label in enumerate(fov_labels):
+        region, fov = parse_fov_label(label)
+        by_region.setdefault(region, []).append((fov, idx))
+
+    kept = set()
+    for entries in by_region.values():
+        for _fov, idx in sorted(entries)[:n]:
+            kept.add(idx)
+    return sorted(kept)
+
+
 def data_structure_changed(
     old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
 ) -> bool:
@@ -1623,11 +1664,15 @@ class LightweightViewer(QWidget):
         self._tiff_handles_lock = threading.Lock()  # protects the dict itself
         self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
-        # IMA-191: subset the slider to N FOVs per region (well). Default off;
-        # applies to datasets loaded from disk (the "review before quantifying"
-        # workflow). Live-acquisition/push slider is unaffected.
+        # IMA-191: subset the slider to N FOVs per region (well). Default off.
+        # Applies to datasets loaded from disk AND to live/push acquisition.
+        # For push mode, _subset_kept_indices holds the kept flat FOV indices
+        # (identity when disabled) and the FOV slider maps contiguous positions
+        # onto them; _current_fov_idx always stays the true flat/global index so
+        # every downstream loader is unaffected.
         self._subset_enabled: bool = False
         self._subset_n_per_region: int = 1
+        self._subset_kept_indices: List[int] = []
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
         self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
@@ -1839,16 +1884,22 @@ class LightweightViewer(QWidget):
             self._current_time_idx = value
             self._time_label.setText(f"T: {value}")
 
-            # Update FOV slider max for this timepoint
+            # Update FOV slider max for this timepoint. The slider is in
+            # position space (subset-aware); _current_fov_idx stays the flat
+            # FOV index. With the subset off, the mapping is identity so this
+            # behaves exactly as before.
             self._updating_sliders = True
             try:
-                available_fov_max = self._max_fov_per_time.get(value, 0)
-                self._fov_slider.setMaximum(available_fov_max)
+                max_flat = self._max_fov_per_time.get(value, 0)
+                pos_max = self._fov_slider_max_for(max_flat)
+                self._fov_slider.setMaximum(pos_max)
 
-                # Clamp current FOV if it exceeds available range
-                if self._current_fov_idx > available_fov_max:
-                    self._current_fov_idx = available_fov_max
-                    self._fov_slider.setValue(available_fov_max)
+                # Clamp current FOV if it exceeds available range (position space)
+                cur_pos = self._fov_flat_to_pos(self._current_fov_idx)
+                if cur_pos > pos_max:
+                    cur_pos = pos_max
+                    self._fov_slider.setValue(pos_max)
+                self._current_fov_idx = self._fov_pos_to_flat(cur_pos)
 
                 # Update FOV label to reflect current FOV after any clamping
                 if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
@@ -1863,16 +1914,17 @@ class LightweightViewer(QWidget):
             self._load_current_position()
 
     def _on_fov_slider_changed(self, value: int):
-        """Handle FOV slider change."""
+        """Handle FOV slider change (``value`` is a slider position)."""
         if self._updating_sliders:
             return
-        if value != self._current_fov_idx:
-            self._current_fov_idx = value
+        flat = self._fov_pos_to_flat(value)
+        if flat != self._current_fov_idx:
+            self._current_fov_idx = flat
             # Update FOV label with well:fov format if available
-            if self._fov_labels and value < len(self._fov_labels):
-                self._fov_label.setText(f"FOV: {self._fov_labels[value]}")
+            if self._fov_labels and flat < len(self._fov_labels):
+                self._fov_label.setText(f"FOV: {self._fov_labels[flat]}")
             else:
-                self._fov_label.setText(f"FOV: {value}")
+                self._fov_label.setText(f"FOV: {flat}")
             self._load_current_position()
 
     def _load_current_position(self):
@@ -1928,16 +1980,93 @@ class LightweightViewer(QWidget):
             pass
 
     def _on_subset_toggled(self, checked: bool) -> None:
-        """Enable/disable the per-region FOV subset and reload the dataset."""
+        """Enable/disable the per-region FOV subset and reapply it."""
         self._subset_enabled = checked
         self._subset_spinbox.setEnabled(checked)
-        self._force_refresh()
+        self._reapply_subset()
 
     def _on_subset_n_changed(self, value: int) -> None:
-        """Change N (FOVs kept per region) and reload if the subset is active."""
+        """Change N (FOVs kept per region) and reapply if the subset is active."""
         self._subset_n_per_region = max(1, int(value))
         if self._subset_enabled:
+            self._reapply_subset()
+
+    def _reapply_subset(self) -> None:
+        """Reapply the subset after a control change.
+
+        Push/live mode remaps the FOV slider in place (data keeps streaming);
+        disk datasets are reloaded so the FOV dimension is rebuilt.
+        """
+        if self.is_push_mode_active() or self.is_zarr_push_mode_active():
+            self._recompute_kept_fov_indices()
+            self._refresh_fov_slider_range()
+        else:
             self._force_refresh()
+
+    # --- push-mode slider <-> flat-index mapping ---------------------------
+
+    def _recompute_kept_fov_indices(self) -> None:
+        """Recompute the kept flat FOV indices from the current labels."""
+        n = self._subset_n_per_region if self._subset_enabled else 0
+        self._subset_kept_indices = kept_fov_indices(self._fov_labels, n)
+
+    def _init_push_subset(self) -> None:
+        """After push FOV labels are (re)built: recompute kept indices and show
+        the subset control when the acquisition spans more than one region."""
+        self._recompute_kept_fov_indices()
+        n_regions = len({parse_fov_label(lbl)[0] for lbl in self._fov_labels})
+        self._update_subset_control(n_regions)
+
+    def _fov_slider_max_for(self, max_flat: int) -> int:
+        """Slider position-max for a given max flat FOV index acquired.
+
+        With the subset off (or no kept indices) this returns ``max_flat``
+        unchanged, so slider behavior is identical to the non-subset path.
+        """
+        if not self._subset_enabled or not self._subset_kept_indices:
+            return max_flat
+        available = sum(1 for i in self._subset_kept_indices if i <= max_flat)
+        return max(0, available - 1)
+
+    def _fov_pos_to_flat(self, pos: int) -> int:
+        """Map a slider position to its flat/global FOV index."""
+        kept = self._subset_kept_indices
+        if not self._subset_enabled or not kept:
+            return pos
+        pos = max(0, min(pos, len(kept) - 1))
+        return kept[pos]
+
+    def _fov_flat_to_pos(self, flat: int) -> int:
+        """Map a flat/global FOV index to its slider position.
+
+        Falls back to the nearest kept position at or below ``flat`` (else 0)
+        when ``flat`` was subset out.
+        """
+        kept = self._subset_kept_indices
+        if not self._subset_enabled or not kept:
+            return flat
+        if flat in kept:
+            return kept.index(flat)
+        below = [p for p, i in enumerate(kept) if i <= flat]
+        return below[-1] if below else 0
+
+    def _refresh_fov_slider_range(self) -> None:
+        """Resync the FOV slider position range/value to the current subset."""
+        max_flat = self._max_fov_per_time.get(self._current_time_idx, 0)
+        pos_max = self._fov_slider_max_for(max_flat)
+        self._updating_sliders = True
+        try:
+            self._fov_slider.setMaximum(pos_max)
+            pos = min(self._fov_flat_to_pos(self._current_fov_idx), pos_max)
+            self._fov_slider.setValue(pos)
+            self._current_fov_idx = self._fov_pos_to_flat(pos)
+            if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
+                self._fov_label.setText(
+                    f"FOV: {self._fov_labels[self._current_fov_idx]}"
+                )
+        finally:
+            self._updating_sliders = False
+        self._load_current_position()
 
     def _update_speed_control_visibility(self):
         """Show the playback speed control when either slider row is shown.
@@ -2071,6 +2200,7 @@ class LightweightViewer(QWidget):
         self._image_width = width
         self._fov_labels = list(fov_labels)
         self._sync_slider_label_widths()
+        self._init_push_subset()
 
         # Set up LUTs based on channel wavelengths
         self._luts = {
@@ -2213,9 +2343,11 @@ class LightweightViewer(QWidget):
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
                     current_fov_max = self._fov_slider.maximum()
-                    available_fov_max = self._max_fov_per_time.get(t, 0)
-                    if available_fov_max > current_fov_max:
-                        self._fov_slider.setMaximum(available_fov_max)
+                    # Subset-aware position max (identity when subset off); the
+                    # slider only grows when a *kept* FOV is acquired.
+                    pos_max = self._fov_slider_max_for(self._max_fov_per_time.get(t, 0))
+                    if pos_max > current_fov_max:
+                        self._fov_slider.setMaximum(pos_max)
             finally:
                 self._updating_sliders = False
 
@@ -2270,7 +2402,8 @@ class LightweightViewer(QWidget):
         try:
             self._time_slider.setValue(self._current_time_idx)
             self._time_label.setText(f"T: {self._current_time_idx}")
-            self._fov_slider.setValue(self._current_fov_idx)
+            # Slider is in position space; map the flat FOV index onto it.
+            self._fov_slider.setValue(self._fov_flat_to_pos(self._current_fov_idx))
             if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
                 self._fov_label.setText(
                     f"FOV: {self._fov_labels[self._current_fov_idx]}"
@@ -2309,6 +2442,17 @@ class LightweightViewer(QWidget):
             )
             return False
 
+        # Programmatic navigation always honors the exact target, even when the
+        # per-region subset would otherwise hide it (T6: no silent failure).
+        if (
+            self._subset_enabled
+            and self._subset_kept_indices
+            and flat_idx not in self._subset_kept_indices
+        ):
+            logger.info(
+                "go_to_well_fov: %s is outside the current subset; loading it anyway",
+                target_label,
+            )
         self.load_fov(flat_idx)
         logger.info(
             f"go_to_well_fov: navigated to {target_label} (flat_idx={flat_idx})"
@@ -2585,6 +2729,7 @@ class LightweightViewer(QWidget):
             fov_labels = list(fov_labels)[:min_len]
             self._fov_labels = fov_labels
         self._sync_slider_label_widths()
+        self._init_push_subset()
         self._zarr_fov_paths = [Path(p) for p in fov_paths]
 
         # Build channel name to index map
@@ -2716,6 +2861,7 @@ class LightweightViewer(QWidget):
             for fov_in_region in range(n_fov):
                 self._fov_labels.append(f"{region_label}:{fov_in_region}")
         self._sync_slider_label_widths()
+        self._init_push_subset()
         logger.info(
             f"6D regions mode: labels={self._fov_labels[:5]}..., paths={len(self._zarr_region_paths)}, fovs_per_region={self._fovs_per_region}, offsets={self._region_fov_offsets}"
         )
@@ -2867,9 +3013,11 @@ class LightweightViewer(QWidget):
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
                     current_fov_max = self._fov_slider.maximum()
-                    available_fov_max = self._max_fov_per_time.get(t, 0)
-                    if available_fov_max > current_fov_max:
-                        self._fov_slider.setMaximum(available_fov_max)
+                    # Subset-aware position max (identity when subset off); the
+                    # slider only grows when a *kept* FOV is acquired.
+                    pos_max = self._fov_slider_max_for(self._max_fov_per_time.get(t, 0))
+                    if pos_max > current_fov_max:
+                        self._fov_slider.setMaximum(pos_max)
             finally:
                 self._updating_sliders = False
 
