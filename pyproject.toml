@@ -21,6 +21,7 @@ dependencies = [
     "tensorstore",
     "ndv>=0.4.0,<0.5.0",
     "pyconify",
+    "Pillow",
 ]
 
 [project.scripts]
@@ -29,6 +30,9 @@ ndviewer-light = "ndviewer_light.core:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ndviewer_light"]
+
+[tool.setuptools.package-data]
+ndviewer_light = ["*.svg"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

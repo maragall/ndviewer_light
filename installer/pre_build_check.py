@@ -24,6 +24,7 @@ from pathlib import Path
 # 1. Run PyInstaller Analysis phase only
 # ---------------------------------------------------------------------------
 
+
 def run_analysis(spec_path: Path):
     """
     Run PyInstaller on a .spec file, then read back the warn file and
@@ -40,13 +41,18 @@ def run_analysis(spec_path: Path):
         # Run pyinstaller — it will fail at EXE/COLLECT since we don't care
         # about those, but Analysis will complete and write the warn file + TOC
         import subprocess
+
         result = subprocess.run(
             [
-                sys.executable, "-m", "PyInstaller",
+                sys.executable,
+                "-m",
+                "PyInstaller",
                 str(spec_path),
                 "--noconfirm",
-                "--workpath", workpath,
-                "--distpath", distpath,
+                "--workpath",
+                workpath,
+                "--distpath",
+                distpath,
             ],
             capture_output=True,
             text=True,
@@ -82,7 +88,8 @@ def run_analysis(spec_path: Path):
             "pure": 0,
             "binaries": len(binaries),
             "datas": 0,
-            "completed": "Looking for ctypes DLLs" in full_output or result.returncode == 0,
+            "completed": "Looking for ctypes DLLs" in full_output
+            or result.returncode == 0,
         }
 
         # Count from log lines
@@ -90,6 +97,7 @@ def run_analysis(spec_path: Path):
             if "Performing binary vs. data reclassification" in line:
                 # e.g. "Performing binary vs. data reclassification (6316 entries)"
                 import re as _re
+
                 m = _re.search(r"\((\d+) entries\)", line)
                 if m:
                     stats["total_entries"] = int(m.group(1))
@@ -101,6 +109,7 @@ def run_analysis(spec_path: Path):
 # 2. Analyze collected binaries and check DLL dependencies
 # ---------------------------------------------------------------------------
 
+
 def check_dll_deps(binaries):
     """
     Use pefile to scan all collected .pyd and .dll files for their
@@ -111,7 +120,10 @@ def check_dll_deps(binaries):
     try:
         import pefile
     except ImportError:
-        return None, "pefile not installed — skip DLL dependency check (pip install pefile)"
+        return (
+            None,
+            "pefile not installed — skip DLL dependency check (pip install pefile)",
+        )
 
     # Collect all binary paths
     collected_dlls = set()
@@ -124,20 +136,52 @@ def check_dll_deps(binaries):
 
     # System DLLs that Windows provides (don't need to be bundled)
     SYSTEM_DLLS = {
-        "kernel32.dll", "user32.dll", "gdi32.dll", "advapi32.dll",
-        "shell32.dll", "ole32.dll", "oleaut32.dll", "comctl32.dll",
-        "comdlg32.dll", "ws2_32.dll", "wsock32.dll", "ntdll.dll",
-        "msvcrt.dll", "ucrtbase.dll", "bcrypt.dll", "crypt32.dll",
-        "secur32.dll", "winspool.drv", "shlwapi.dll", "rpcrt4.dll",
-        "imm32.dll", "winmm.dll", "version.dll", "netapi32.dll",
-        "userenv.dll", "setupapi.dll", "cfgmgr32.dll", "powrprof.dll",
-        "mswsock.dll", "iphlpapi.dll", "wldap32.dll", "normaliz.dll",
-        "dnsapi.dll", "dbghelp.dll", "psapi.dll", "pdh.dll",
+        "kernel32.dll",
+        "user32.dll",
+        "gdi32.dll",
+        "advapi32.dll",
+        "shell32.dll",
+        "ole32.dll",
+        "oleaut32.dll",
+        "comctl32.dll",
+        "comdlg32.dll",
+        "ws2_32.dll",
+        "wsock32.dll",
+        "ntdll.dll",
+        "msvcrt.dll",
+        "ucrtbase.dll",
+        "bcrypt.dll",
+        "crypt32.dll",
+        "secur32.dll",
+        "winspool.drv",
+        "shlwapi.dll",
+        "rpcrt4.dll",
+        "imm32.dll",
+        "winmm.dll",
+        "version.dll",
+        "netapi32.dll",
+        "userenv.dll",
+        "setupapi.dll",
+        "cfgmgr32.dll",
+        "powrprof.dll",
+        "mswsock.dll",
+        "iphlpapi.dll",
+        "wldap32.dll",
+        "normaliz.dll",
+        "dnsapi.dll",
+        "dbghelp.dll",
+        "psapi.dll",
+        "pdh.dll",
         # MSVC runtime — usually redistributed or on system
-        "vcruntime140.dll", "vcruntime140_1.dll",
-        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-        "concrt140.dll", "vcomp140.dll",
-        "ucrtbased.dll", "vcruntime140d.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "concrt140.dll",
+        "vcomp140.dll",
+        "ucrtbased.dll",
+        "vcruntime140d.dll",
         # API sets (Windows 10+)
         "api-ms-win-",
     }
@@ -175,18 +219,22 @@ def check_dll_deps(binaries):
                     # Check with python3X.dll pattern
                     if dep_lower.startswith("python3") and dep_lower.endswith(".dll"):
                         continue  # Python DLL, handled by bootloader
-                    issues.append({
-                        "binary": name,
-                        "source": src_path,
-                        "missing_dll": dep_dll,
-                    })
+                    issues.append(
+                        {
+                            "binary": name,
+                            "source": src_path,
+                            "missing_dll": dep_dll,
+                        }
+                    )
             pe.close()
         except Exception as exc:
-            issues.append({
-                "binary": name,
-                "source": src_path,
-                "error": str(exc),
-            })
+            issues.append(
+                {
+                    "binary": name,
+                    "source": src_path,
+                    "error": str(exc),
+                }
+            )
 
     return issues, f"Scanned {checked} .pyd/.dll files"
 
@@ -195,13 +243,14 @@ def check_dll_deps(binaries):
 # 3. Parse warnings for actionable items
 # ---------------------------------------------------------------------------
 
+
 def parse_warnings(warnings_text: str):
     """Extract actionable warnings from PyInstaller warn file."""
     if not warnings_text:
         return [], []
 
     critical = []  # top-level missing imports (will crash)
-    notable = []   # delayed/optional (may be fine)
+    notable = []  # delayed/optional (may be fine)
 
     for line in warnings_text.splitlines():
         line = line.strip()
@@ -224,10 +273,12 @@ def parse_warnings(warnings_text: str):
 # 4. Check which packages have PyInstaller hooks
 # ---------------------------------------------------------------------------
 
+
 def check_hooks(hiddenimports: list[str]):
     """Check which of our dependencies have PyInstaller hooks."""
     try:
         import PyInstaller
+
         hooks_dir = Path(PyInstaller.__path__[0]) / "hooks"
     except (ImportError, IndexError):
         return {}
@@ -246,9 +297,11 @@ def check_hooks(hiddenimports: list[str]):
             continue
         seen_top.add(top)
         # Check for exact match or top-level match
-        has_hook = (top in available_hooks or
-                    mod in available_hooks or
-                    any(h.startswith(top + ".") or h == top for h in available_hooks))
+        has_hook = (
+            top in available_hooks
+            or mod in available_hooks
+            or any(h.startswith(top + ".") or h == top for h in available_hooks)
+        )
         results[top] = has_hook
 
     return results
@@ -257,6 +310,7 @@ def check_hooks(hiddenimports: list[str]):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -273,6 +327,7 @@ def main():
 
     # --- Parse spec for hiddenimports/excludes ---
     from import_walker import parse_spec
+
     hidden, excludes = parse_spec(spec_path)
     print(f"Spec: {len(hidden)} hiddenimports, {len(excludes)} excludes")
 
@@ -294,6 +349,7 @@ def main():
     except Exception as exc:
         print(f"\n  ANALYSIS FAILED: {type(exc).__name__}: {exc}")
         import traceback
+
         traceback.print_exc()
         return 1
 
@@ -307,7 +363,9 @@ def main():
     # --- Parse warnings ---
     critical_warns, notable_warns = parse_warnings(warnings_text)
     if critical_warns:
-        print(f"\n  CRITICAL WARNINGS ({len(critical_warns)} top-level missing imports):")
+        print(
+            f"\n  CRITICAL WARNINGS ({len(critical_warns)} top-level missing imports):"
+        )
         for w in critical_warns[:20]:
             print(f"    {w}")
         if len(critical_warns) > 20:
