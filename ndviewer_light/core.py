@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QStyleFactory,
     QVBoxLayout,
     QWidget,
@@ -86,12 +87,19 @@ PIL_EXTENSIONS = {".bmp", ".png", ".jpg", ".jpeg"}
 # All single-image formats the single-file reader can ingest.
 IMAGE_EXTENSIONS = TIFF_EXTENSIONS | PIL_EXTENSIONS
 LIVE_REFRESH_INTERVAL_MS = 750
-SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
+DEFAULT_PLAYBACK_FPS = 5  # Default play-button animation rate (IMA-190)
+PLAYBACK_FPS_MIN = 1
+PLAYBACK_FPS_MAX = 10
 ZARR_LOAD_DEBOUNCE_MS = 200  # Debounce interval for zarr frame loading
 PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
 PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
+
+
+def _fps_to_interval_ms(fps: int) -> int:
+    """Convert a playback rate in fps to a QTimer interval in milliseconds."""
+    return round(1000 / max(1, fps))
 
 
 def _create_play_button(parent=None) -> QPushButton:
@@ -1562,6 +1570,7 @@ class LightweightViewer(QWidget):
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
+        self._playback_fps: int = DEFAULT_PLAYBACK_FPS  # Shared by both play buttons
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
         self._load_debounce_timer: Optional[QTimer] = (
@@ -1681,6 +1690,23 @@ class LightweightViewer(QWidget):
         )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
+        # Playback speed control, shared by both play buttons (IMA-190).
+        # Fixed right-aligned slot; visible whenever either slider row is.
+        self._speed_container = QWidget()
+        speed_layout = QHBoxLayout(self._speed_container)
+        speed_layout.setContentsMargins(0, 0, 0, 0)
+        speed_layout.setSpacing(5)
+        speed_layout.addStretch(1)
+        self._speed_spinbox = QSpinBox()
+        self._speed_spinbox.setRange(PLAYBACK_FPS_MIN, PLAYBACK_FPS_MAX)
+        self._speed_spinbox.setValue(self._playback_fps)
+        self._speed_spinbox.setSuffix(" fps")
+        self._speed_spinbox.setToolTip("Playback speed for the play buttons")
+        self._speed_spinbox.valueChanged.connect(self._on_playback_fps_changed)
+        speed_layout.addWidget(self._speed_spinbox)
+        self._speed_container.setVisible(False)  # Hidden until a slider row shows
+        slider_layout.addWidget(self._speed_container)
+
         layout.addWidget(slider_container)
 
         self.setLayout(layout)
@@ -1743,22 +1769,60 @@ class LightweightViewer(QWidget):
         """Show/hide FOV slider based on number of FOVs."""
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
+        self._update_speed_control_visibility()
 
-    def _on_time_play_clicked(self, checked: bool):
-        """Handle time play button click."""
+    def _update_speed_control_visibility(self):
+        """Show the playback speed control when either slider row is shown.
+
+        Uses isHidden() (explicit-hide state) rather than isVisible() so the
+        intent survives a hidden ancestor (e.g. during construction).
+        """
+        self._speed_container.setVisible(
+            not self._time_container.isHidden()
+            or not self._fov_slider_container.isHidden()
+        )
+
+    def _on_playback_fps_changed(self, fps: int):
+        """Handle playback speed change; retime any active play timers."""
+        self._playback_fps = fps
+        interval_ms = _fps_to_interval_ms(fps)
+        for timer in (self._time_play_timer, self._fov_play_timer):
+            if timer is not None and timer.isActive():
+                timer.setInterval(interval_ms)
+
+    def _toggle_play_animation(
+        self,
+        timer: Optional[QTimer],
+        button: QPushButton,
+        step_cb,
+        checked: bool,
+    ) -> Optional[QTimer]:
+        """Start or stop a slider play animation.
+
+        Returns the (possibly newly created) timer so the caller can rebind
+        its instance attribute — a parameter cannot rebind the caller's
+        self._X_play_timer.
+        """
         if checked:
             # Update text for fallback (iconify handles icon automatically)
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("⏸")
-            if self._time_play_timer is None:
-                self._time_play_timer = QTimer(self)
-                self._time_play_timer.timeout.connect(self._time_play_step)
-            self._time_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+                button.setText("⏸")
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(step_cb)
+            timer.start(_fps_to_interval_ms(self._playback_fps))
         else:
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("▶")
-            if self._time_play_timer:
-                self._time_play_timer.stop()
+                button.setText("▶")
+            if timer:
+                timer.stop()
+        return timer
+
+    def _on_time_play_clicked(self, checked: bool):
+        """Handle time play button click."""
+        self._time_play_timer = self._toggle_play_animation(
+            self._time_play_timer, self._time_play_btn, self._time_play_step, checked
+        )
 
     def _time_play_step(self):
         """Advance time slider by one step (looping)."""
@@ -1771,18 +1835,9 @@ class LightweightViewer(QWidget):
 
     def _on_fov_play_clicked(self, checked: bool):
         """Handle FOV play button click."""
-        if checked:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("⏸")
-            if self._fov_play_timer is None:
-                self._fov_play_timer = QTimer(self)
-                self._fov_play_timer.timeout.connect(self._fov_play_step)
-            self._fov_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
-        else:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("▶")
-            if self._fov_play_timer:
-                self._fov_play_timer.stop()
+        self._fov_play_timer = self._toggle_play_animation(
+            self._fov_play_timer, self._fov_play_btn, self._fov_play_step, checked
+        )
 
     def _fov_play_step(self):
         """Advance FOV slider by one step (looping)."""
@@ -1984,6 +2039,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
@@ -2635,6 +2691,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
