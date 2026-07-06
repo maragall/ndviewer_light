@@ -860,32 +860,48 @@ class TestLRUHandleCache:
             shutil.rmtree(tmpdir)
 
 
-def _format_fov_label(fov_labels, value):
-    """Format FOV label text for the given slider value.
-
-    Args:
-        fov_labels: List of FOV labels in "well:fov" format, or empty list.
-        value: Slider value (FOV index).
-
-    Returns:
-        Formatted label string, e.g. "FOV: A1:0" or "FOV: 5".
-    """
-    if fov_labels and value < len(fov_labels):
-        return f"FOV: {fov_labels[value]}"
-    return f"FOV: {value}"
-
-
 class TestFovLabelUpdate:
-    """Tests for FOV label display updates."""
+    """Tests for the production FOV label formatter (format_fov_label).
+
+    Regression tests: the formatter consolidated six inline setText sites
+    that had THREE distinct fallback behaviors — "FOV: {label}",
+    "FOV: {idx}", and "FOV: -" (acquisition-start placeholder). Each is
+    pinned here.
+    """
 
     def test_fov_slider_updates_label_with_fov_labels(self):
         """FOV slider change updates label with well:fov format."""
+        from ndviewer_light import format_fov_label
+
         fov_labels = ["A1:0", "A1:1", "A2:0"]
 
-        assert _format_fov_label(fov_labels, 0) == "FOV: A1:0"
-        assert _format_fov_label(fov_labels, 1) == "FOV: A1:1"
-        assert _format_fov_label(fov_labels, 2) == "FOV: A2:0"
+        assert format_fov_label(fov_labels, 0) == "FOV: A1:0"
+        assert format_fov_label(fov_labels, 1) == "FOV: A1:1"
+        assert format_fov_label(fov_labels, 2) == "FOV: A2:0"
 
     def test_fov_slider_updates_label_without_fov_labels(self):
         """FOV slider change shows numeric index when no labels."""
-        assert _format_fov_label([], 5) == "FOV: 5"
+        from ndviewer_light import format_fov_label
+
+        assert format_fov_label([], 5) == "FOV: 5"
+        assert format_fov_label(None, 5) == "FOV: 5"
+
+    def test_acquisition_start_dash_placeholder(self):
+        """Regression: acquisition-start sites show 'FOV: -' when no labels."""
+        from ndviewer_light import format_fov_label
+
+        assert format_fov_label([], 0, empty_text="-") == "FOV: -"
+        assert format_fov_label(None, 0, empty_text="-") == "FOV: -"
+
+    def test_acquisition_start_first_label(self):
+        """Regression: acquisition-start sites show labels[0] when labels exist."""
+        from ndviewer_light import format_fov_label
+
+        assert format_fov_label(["B1:0", "B1:1"], 0, empty_text="-") == "FOV: B1:0"
+
+    def test_out_of_range_index_falls_back_to_numeric(self):
+        """Regression: index beyond the label list shows the numeric index."""
+        from ndviewer_light import format_fov_label
+
+        assert format_fov_label(["A1:0"], 3) == "FOV: 3"
+        assert format_fov_label(["A1:0"], -1) == "FOV: -1"

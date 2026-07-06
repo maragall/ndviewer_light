@@ -89,6 +89,19 @@ PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cach
 # Play button style (matches NDV's PlayButton)
 PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
 
+# On-image well/region overlay (top-left corner of the canvas)
+WELL_OVERLAY_MARGIN = 10  # px from the viewer's top-left corner
+WELL_OVERLAY_STYLE = """
+QLabel {
+    color: white;
+    background-color: rgba(0, 0, 0, 140);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 16px;
+    font-weight: bold;
+}
+"""
+
 
 def _create_play_button(parent=None) -> QPushButton:
     """Create a play button matching NDV's style."""
@@ -1416,6 +1429,49 @@ class LauncherWindow(QMainWindow):
         _apply_dark_theme(self)
 
 
+def format_fov_label(
+    fov_labels: Optional[List[str]], idx: int, empty_text: Optional[str] = None
+) -> str:
+    """Format the FOV text shown next to the FOV slider.
+
+    Falls back to the numeric index when labels are missing or the index is
+    out of range. When ``empty_text`` is given (e.g. "-") and there are no
+    labels at all, it is used instead of the numeric index — this preserves
+    the "FOV: -" placeholder shown at acquisition start.
+    """
+    if fov_labels and 0 <= idx < len(fov_labels):
+        return f"FOV: {fov_labels[idx]}"
+    if empty_text is not None and not fov_labels:
+        return f"FOV: {empty_text}"
+    return f"FOV: {idx}"
+
+
+def format_well_overlay_label(
+    fov_labels: Optional[List[str]], idx: Any
+) -> Optional[str]:
+    """Text for the on-image well overlay, or None to hide it.
+
+    Hides when labels are missing, the index is not a plain int (ndv types
+    current_index values as int | slice), the index is out of range, or the
+    region token is the "default" pseudo-region that loaders fabricate for
+    flat single-region datasets — "default:3" answers "which well is this?"
+    with a non-well, so it never renders.
+    """
+    if not fov_labels:
+        return None
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        return None
+    if not 0 <= idx < len(fov_labels):
+        return None
+    label = fov_labels[idx]
+    if not isinstance(label, str) or not label:
+        return None
+    region = label.split(":", 1)[0]
+    if region == "default":
+        return None
+    return label
+
+
 class LightweightViewer(QWidget):
     """Minimal NDV-based viewer with external FOV/Time navigation.
 
@@ -1490,6 +1546,16 @@ class LightweightViewer(QWidget):
             None  # Debounce for _load_current_fov
         )
         self._load_pending: bool = False  # True if load is scheduled
+
+        # On-image well/region overlay state (created in _setup_ui).
+        # _dataset_overlay_active: True while a dataset-mode subscription to
+        # ndv's current_index drives the overlay; push-mode writes leave the
+        # overlay alone while it is set (mode precedence).
+        # _ndv_index_events: the current_index evented dict we connected to,
+        # kept so the callback can be disconnected before each viewer rebuild.
+        self._well_overlay: Optional[QLabel] = None
+        self._dataset_overlay_active: bool = False
+        self._ndv_index_events: Optional[Any] = None
 
         # Zarr push-based API state
         self._zarr_acquisition_active: bool = False
@@ -1607,6 +1673,16 @@ class LightweightViewer(QWidget):
 
         self.setLayout(layout)
 
+        # On-image well/region overlay. Parented to this widget (NOT the ndv
+        # widget, which _set_ndv_data destroys and recreates), outside the
+        # layout, anchored top-left over the canvas. The canvas is the first
+        # layout item so a fixed anchor never needs repositioning on resize.
+        self._well_overlay = QLabel(self)
+        self._well_overlay.setStyleSheet(WELL_OVERLAY_STYLE)
+        self._well_overlay.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._well_overlay.move(WELL_OVERLAY_MARGIN, WELL_OVERLAY_MARGIN)
+        self._well_overlay.hide()
+
     def _on_time_slider_changed(self, value: int):
         """Handle time slider change."""
         if self._updating_sliders:
@@ -1627,12 +1703,7 @@ class LightweightViewer(QWidget):
                     self._fov_slider.setValue(available_fov_max)
 
                 # Update FOV label to reflect current FOV after any clamping
-                if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
-                    self._fov_label.setText(
-                        f"FOV: {self._fov_labels[self._current_fov_idx]}"
-                    )
-                else:
-                    self._fov_label.setText(f"FOV: {self._current_fov_idx}")
+                self._update_fov_display()
             finally:
                 self._updating_sliders = False
 
@@ -1645,10 +1716,7 @@ class LightweightViewer(QWidget):
         if value != self._current_fov_idx:
             self._current_fov_idx = value
             # Update FOV label with well:fov format if available
-            if self._fov_labels and value < len(self._fov_labels):
-                self._fov_label.setText(f"FOV: {self._fov_labels[value]}")
-            else:
-                self._fov_label.setText(f"FOV: {value}")
+            self._update_fov_display(value)
             self._load_current_position()
 
     def _load_current_position(self):
@@ -1665,6 +1733,58 @@ class LightweightViewer(QWidget):
         """Show/hide FOV slider based on number of FOVs."""
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
+
+    # Well/region label flow — two FOV navigation paths, one formatter:
+    #
+    #                     FOV changes
+    #    ┌────────────────────┴─────────────────────────┐
+    #    PUSH MODE (live)                   DATASET MODE (load_dataset)
+    #    external Qt slider /               ndv internal fov slider
+    #    go_to_well_fov / T-clamp                       │
+    #         │                                         ▼
+    #         │ all call sites             display_model.current_index
+    #         ▼                            .value_changed → _on_ndv_index_changed
+    #    _update_fov_display(idx)          (seeded at subscribe; disconnect old
+    #         │ labels: self._fov_labels    model before each resubscribe)
+    #         │                                         │ labels: self._xarray_data
+    #         │                                         │   .attrs["fov_labels"]
+    #         └──────────────┬──────────────────────────┘  (read at event time)
+    #                        ▼
+    #           format_fov_label / format_well_overlay_label
+    #                        │
+    #           ┌────────────┴────────────┐
+    #           ▼                         ▼
+    #    _fov_label (slider text)   _well_overlay (QLabel on the image;
+    #                               dataset subscription takes precedence
+    #                               over push-mode writes while active)
+    def _update_fov_display(
+        self, idx: Optional[int] = None, empty_text: Optional[str] = None
+    ):
+        """Single write path for push-mode FOV display updates.
+
+        Updates the slider text label and, unless a dataset-mode overlay
+        subscription is active (which then owns the overlay), the on-image
+        well overlay.
+        """
+        if idx is None:
+            idx = self._current_fov_idx
+        self._fov_label.setText(format_fov_label(self._fov_labels, idx, empty_text))
+        if not self._dataset_overlay_active:
+            self._set_well_overlay_text(
+                format_well_overlay_label(self._fov_labels, idx)
+            )
+
+    def _set_well_overlay_text(self, text: Optional[str]):
+        """Show the on-image well overlay with `text`, or hide it when None."""
+        if self._well_overlay is None:
+            return
+        if text:
+            self._well_overlay.setText(text)
+            self._well_overlay.adjustSize()
+            self._well_overlay.show()
+            self._well_overlay.raise_()
+        else:
+            self._well_overlay.hide()
 
     def _on_time_play_clicked(self, checked: bool):
         """Handle time play button click."""
@@ -1791,10 +1911,7 @@ class LightweightViewer(QWidget):
 
             self._fov_slider.setMaximum(0)  # Start at 0, grows as FOVs are acquired
             self._fov_slider.setValue(0)
-            if fov_labels:
-                self._fov_label.setText(f"FOV: {fov_labels[0]}")
-            else:
-                self._fov_label.setText("FOV: -")
+            self._update_fov_display(0, empty_text="-")
         finally:
             self._updating_sliders = False
 
@@ -1968,12 +2085,7 @@ class LightweightViewer(QWidget):
             self._time_slider.setValue(self._current_time_idx)
             self._time_label.setText(f"T: {self._current_time_idx}")
             self._fov_slider.setValue(self._current_fov_idx)
-            if self._fov_labels and self._current_fov_idx < len(self._fov_labels):
-                self._fov_label.setText(
-                    f"FOV: {self._fov_labels[self._current_fov_idx]}"
-                )
-            else:
-                self._fov_label.setText(f"FOV: {self._current_fov_idx}")
+            self._update_fov_display()
         finally:
             self._updating_sliders = False
 
@@ -2311,10 +2423,7 @@ class LightweightViewer(QWidget):
 
             self._fov_slider.setMaximum(0)
             self._fov_slider.setValue(0)
-            if fov_labels:
-                self._fov_label.setText(f"FOV: {fov_labels[0]}")
-            else:
-                self._fov_label.setText("FOV: -")
+            self._update_fov_display(0, empty_text="-")
         finally:
             self._updating_sliders = False
 
@@ -2445,10 +2554,7 @@ class LightweightViewer(QWidget):
 
             self._fov_slider.setMaximum(0)  # Start at 0, grows as FOVs are acquired
             self._fov_slider.setValue(0)
-            if self._fov_labels:
-                self._fov_label.setText(f"FOV: {self._fov_labels[0]}")
-            else:
-                self._fov_label.setText("FOV: -")
+            self._update_fov_display(0, empty_text="-")
         finally:
             self._updating_sliders = False
 
@@ -3413,6 +3519,10 @@ class LightweightViewer(QWidget):
             xarr = xarr.transpose("time", "fov", "z", "channel", "y", "x")
             xarr.attrs["luts"] = luts
             xarr.attrs["channel_names"] = channel_names
+            # Well/region label per flat fov index; consumed by the on-image
+            # well overlay at event time. Order matches the fov stacking
+            # order above (fovs is sorted by region, then fov).
+            xarr.attrs["fov_labels"] = [f"{f['region']}:{f['fov']}" for f in fovs]
             xarr.attrs["_open_tifs"] = tifs_kept
 
             # Store physical pixel sizes (in micrometers)
@@ -3562,6 +3672,8 @@ class LightweightViewer(QWidget):
             )
             xarr.attrs["luts"] = luts
             xarr.attrs["channel_names"] = channel_names
+            # Well/region label per flat fov index (see well overlay).
+            xarr.attrs["fov_labels"] = [f"{f['region']}:{f['fov']}" for f in fovs]
 
             # Store physical pixel sizes (in micrometers)
             if pixel_size_um is not None:
@@ -3597,7 +3709,9 @@ class LightweightViewer(QWidget):
         """
         try:
             if structure_type == "6d":
-                return self._load_zarr_v3_6d(fovs[0]["path"])
+                return self._load_zarr_v3_6d(
+                    fovs[0]["path"], region=fovs[0].get("region", "default")
+                )
             else:
                 return self._load_zarr_v3_5d(fovs)
         except Exception as e:
@@ -3726,6 +3840,8 @@ class LightweightViewer(QWidget):
         )
         xarr.attrs["luts"] = luts
         xarr.attrs["channel_names"] = channel_names
+        # Well/region label per flat fov index (see well overlay).
+        xarr.attrs["fov_labels"] = [f"{f['region']}:{f['fov']}" for f in fovs]
 
         # Store physical sizes
         if meta.get("pixel_size_um") is not None:
@@ -3738,11 +3854,18 @@ class LightweightViewer(QWidget):
 
         return xarr
 
-    def _load_zarr_v3_6d(self, zarr_path: Path) -> "Optional[xr.DataArray]":
+    def _load_zarr_v3_6d(
+        self, zarr_path: Path, region: str = "default"
+    ) -> "Optional[xr.DataArray]":
         """Load a single 6D zarr v3 store with FOV dimension.
 
         Handles zarr stores with dimensions like (T, FOV, C, Z, Y, X).
         Uses tensorstore to support both zarr v2 and v3 formats.
+
+        Args:
+            zarr_path: Path to the 6D zarr store.
+            region: Region/well label for this store's FOVs (used for the
+                on-image well overlay; "default" renders nothing).
         """
         import dask.array as da
         import xarray as xr
@@ -3843,6 +3966,9 @@ class LightweightViewer(QWidget):
         )
         xarr.attrs["luts"] = luts
         xarr.attrs["channel_names"] = channel_names
+        # Well/region label per fov index (see well overlay). A 6D store is
+        # one region with n_fov fields of view.
+        xarr.attrs["fov_labels"] = [f"{region}:{i}" for i in range(n_fov)]
 
         # Store physical sizes
         if meta.get("pixel_size_um") is not None:
@@ -3854,6 +3980,86 @@ class LightweightViewer(QWidget):
             xarr.attrs["pixel_size_z_um"] = meta["dz_um"]
 
         return xarr
+
+    def _connect_ndv_index_events(self, data: Any):
+        """(Re)wire the well overlay to ndv's current_index (dataset mode).
+
+        Called after every viewer rebuild in _set_ndv_data. Dataset mode is
+        detected by a "fov" dimension plus loader-attached
+        attrs["fov_labels"]; push-mode data has neither (its xarrays are
+        z/channel/y/x only), so a missing "fov" key there is normal and the
+        overlay stays under _update_fov_display's control.
+
+        On any subscription failure the overlay is hidden rather than left
+        showing the previous well — a stale well id on a scientific image is
+        worse than none. Same graceful-degradation contract as the
+        _lut_controllers handling in _schedule_channel_label_update.
+        """
+        # Drop the previous viewer's subscription first: stale connections
+        # could double-fire while the old widget awaits deleteLater.
+        if self._ndv_index_events is not None:
+            try:
+                self._ndv_index_events.value_changed.disconnect(
+                    self._on_ndv_index_changed
+                )
+            except Exception as e:
+                logger.debug("Well overlay: disconnect of old viewer failed: %s", e)
+            self._ndv_index_events = None
+        self._dataset_overlay_active = False
+
+        labels = None
+        try:
+            labels = data.attrs.get("fov_labels")
+        except AttributeError:
+            pass
+        has_fov_dim = "fov" in getattr(data, "dims", ())
+
+        if not (labels and has_fov_dim):
+            # Push mode, or a dataset without well metadata. Push-mode call
+            # sites keep driving the overlay via _update_fov_display; with no
+            # driver at all, make sure nothing stale stays on the image.
+            if not self._fov_labels:
+                self._set_well_overlay_text(None)
+            return
+
+        try:
+            # Note: display_model.current_index is a semi-private ndv surface
+            # (ValidatedEventedDict, ndv 0.4.x); value_changed fires on both
+            # key insertion and change, item_changed only on change.
+            events = self.ndv_viewer.display_model.current_index
+            events.value_changed.connect(self._on_ndv_index_changed)
+            self._ndv_index_events = events
+            self._dataset_overlay_active = True
+            # Seed the initial paint — signals only fire on change, and the
+            # label must be correct before the user first moves any slider.
+            self._on_ndv_index_changed()
+        except Exception as e:
+            logger.warning(
+                "Well overlay disabled: ndv current_index API unavailable (%s)", e
+            )
+            self._ndv_index_events = None
+            self._dataset_overlay_active = False
+            self._set_well_overlay_text(None)
+
+    def _on_ndv_index_changed(self):
+        """Dataset mode: reflect ndv's fov position in the well overlay.
+
+        Labels are read from self._xarray_data.attrs at event time — never
+        captured at subscribe time — because _maybe_refresh's in-place path
+        swaps _xarray_data (and can grow the fov dim) without rebuilding the
+        viewer or resubscribing.
+        """
+        if not self._dataset_overlay_active or self._ndv_index_events is None:
+            return
+        try:
+            data = self._xarray_data
+            labels = data.attrs.get("fov_labels") if data is not None else None
+            idx = self._ndv_index_events.get("fov")
+            self._set_well_overlay_text(format_well_overlay_label(labels, idx))
+        except Exception as e:
+            logger.warning("Well overlay update failed, hiding overlay: %s", e)
+            self._dataset_overlay_active = False
+            self._set_well_overlay_text(None)
 
     def _set_ndv_data(self, data: "xr.DataArray"):
         """Update NDV viewer with lazy array."""
@@ -3905,6 +4111,12 @@ class LightweightViewer(QWidget):
         layout.removeWidget(old_widget)
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
+
+        # Keep the well overlay above the freshly inserted canvas widget,
+        # then rewire its dataset-mode subscription to the new viewer.
+        if self._well_overlay is not None:
+            self._well_overlay.raise_()
+        self._connect_ndv_index_events(data)
 
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
