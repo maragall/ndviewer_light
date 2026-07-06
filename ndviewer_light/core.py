@@ -16,7 +16,15 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+from PyQt5.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPalette,
+    QPixmap,
+)
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -49,8 +57,18 @@ except ImportError:
 
     SUPERQT_AVAILABLE = False
 
+# UI font sizes (px) — single source of truth for viewer/launcher text size
+# (IMA-179). Only text styled by this module scales with these; the embedded
+# ndv widget applies its own font stylesheets, which beat any ancestor rule
+# (see IMA-197). NOTE: superqt's SliderLabel computes its fixed size from font
+# metrics with no FontChange handler, so SLIDER_VALUE_FONT_SIZE_PX above the
+# platform default font size can clip the slider value text.
+UI_FONT_SIZE_PX = 14  # slider row labels, launcher drop label
+SLIDER_VALUE_FONT_SIZE_PX = 12  # superqt SliderLabel value text
+
 # NDV slider style (matches NDV's internal sliders)
-NDV_SLIDER_STYLE = """
+NDV_SLIDER_STYLE = (
+    """
 QSlider::groove:horizontal {
     height: 15px;
     background: qlineargradient(
@@ -72,9 +90,12 @@ QSlider::sub-page:horizontal {
         stop:1 rgba(100, 100, 100, 0.1)
     );
 }
-QLabel { font-size: 12px; }
-SliderLabel { font-size: 10px; }
 """
+    + f"""
+QLabel {{ font-size: {UI_FONT_SIZE_PX}px; }}
+SliderLabel {{ font-size: {SLIDER_VALUE_FONT_SIZE_PX}px; }}
+"""
+)
 
 if TYPE_CHECKING:
     import xarray as xr
@@ -88,12 +109,19 @@ PIL_EXTENSIONS = {".bmp", ".png", ".jpg", ".jpeg"}
 # All single-image formats the single-file reader can ingest.
 IMAGE_EXTENSIONS = TIFF_EXTENSIONS | PIL_EXTENSIONS
 LIVE_REFRESH_INTERVAL_MS = 750
-SLIDER_PLAY_INTERVAL_MS = 100  # Animation interval for play buttons
+DEFAULT_PLAYBACK_FPS = 5  # Default play-button animation rate (IMA-190)
+PLAYBACK_FPS_MIN = 1
+PLAYBACK_FPS_MAX = 10
 ZARR_LOAD_DEBOUNCE_MS = 200  # Debounce interval for zarr frame loading
 PLANE_CACHE_MAX_MEMORY_BYTES = 256 * 1024 * 1024  # 256MB for z-stack plane cache
 
 # Play button style (matches NDV's PlayButton)
 PLAY_BUTTON_STYLE = "QPushButton {border: none; padding: 0; margin: 0;}"
+
+
+def _fps_to_interval_ms(fps: int) -> int:
+    """Convert a playback rate in fps to a QTimer interval in milliseconds."""
+    return round(1000 / max(1, fps))
 
 
 def _create_play_button(parent=None) -> QPushButton:
@@ -1442,19 +1470,19 @@ class LauncherWindow(QMainWindow):
         self.drop_label = QLabel("Drop folder here\nor click to open")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setStyleSheet(
-            """
-            QLabel {
+            f"""
+            QLabel {{
                 border: 2px dashed #666;
                 border-radius: 10px;
                 padding: 40px;
                 background: #2a2a2a;
                 color: #aaa;
-                font-size: 14px;
-            }
-            QLabel:hover {
+                font-size: {UI_FONT_SIZE_PX}px;
+            }}
+            QLabel:hover {{
                 border-color: #888;
                 background: #333;
-            }
+            }}
         """
         )
         self.drop_label.setMinimumHeight(150)
@@ -1612,6 +1640,7 @@ class LightweightViewer(QWidget):
         self._plane_cache = MemoryBoundedLRUCache(PLANE_CACHE_MAX_MEMORY_BYTES)
         self._updating_sliders: bool = False  # Prevent recursive updates
         self._acquisition_active: bool = False  # True during live acquisition
+        self._playback_fps: int = DEFAULT_PLAYBACK_FPS  # Shared by both play buttons
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
         self._load_debounce_timer: Optional[QTimer] = (
@@ -1691,7 +1720,6 @@ class LightweightViewer(QWidget):
         t_layout.setContentsMargins(0, 0, 0, 0)
         t_layout.setSpacing(5)
         self._time_label = QLabel("T")
-        self._time_label.setFixedWidth(30)
         self._time_play_btn = _create_play_button(self)
         self._time_play_btn.clicked.connect(self._on_time_play_clicked)
         if SUPERQT_AVAILABLE:
@@ -1713,7 +1741,6 @@ class LightweightViewer(QWidget):
         fov_layout.setContentsMargins(0, 0, 0, 0)
         fov_layout.setSpacing(5)
         self._fov_label = QLabel("FOV")
-        self._fov_label.setFixedWidth(30)
         self._fov_play_btn = _create_play_button(self)
         self._fov_play_btn.clicked.connect(self._on_fov_play_clicked)
         if SUPERQT_AVAILABLE:
@@ -1730,6 +1757,23 @@ class LightweightViewer(QWidget):
             False
         )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
+
+        # Playback speed control, shared by both play buttons (IMA-190).
+        # Fixed right-aligned slot; visible whenever either slider row is.
+        self._speed_container = QWidget()
+        speed_layout = QHBoxLayout(self._speed_container)
+        speed_layout.setContentsMargins(0, 0, 0, 0)
+        speed_layout.setSpacing(5)
+        speed_layout.addStretch(1)
+        self._speed_spinbox = QSpinBox()
+        self._speed_spinbox.setRange(PLAYBACK_FPS_MIN, PLAYBACK_FPS_MAX)
+        self._speed_spinbox.setValue(self._playback_fps)
+        self._speed_spinbox.setSuffix(" fps")
+        self._speed_spinbox.setToolTip("Playback speed for the play buttons")
+        self._speed_spinbox.valueChanged.connect(self._on_playback_fps_changed)
+        speed_layout.addWidget(self._speed_spinbox)
+        self._speed_container.setVisible(False)  # Hidden until a slider row shows
+        slider_layout.addWidget(self._speed_container)
 
         # IMA-191: FOV subset control — restrict the viewer to N FOVs per region
         # (well). Applies on the next dataset (re)load. Hidden until a dataset
@@ -1754,9 +1798,38 @@ class LightweightViewer(QWidget):
         self._subset_container.setVisible(False)  # Shown when >1 region loaded
         slider_layout.addWidget(self._subset_container)
 
+        # Both labels share one fixed width so the T and FOV sliders align.
+        # rangeChanged re-syncs the width whenever a slider maximum grows
+        # (live acquisition); label-list changes call the sync directly.
+        self._time_slider.rangeChanged.connect(self._sync_slider_label_widths)
+        self._fov_slider.rangeChanged.connect(self._sync_slider_label_widths)
+        self._sync_slider_label_widths()
+
         layout.addWidget(slider_container)
 
         self.setLayout(layout)
+
+    def _sync_slider_label_widths(self, *_) -> None:
+        """Give the T and FOV labels one shared fixed width so the sliders align.
+
+        Width is measured with an explicit QFont at UI_FONT_SIZE_PX because
+        stylesheet fonts only reach a widget's fontMetrics() after it is
+        polished (shown) — widget metrics are stale during setup. Every known
+        FOV label is measured (push-API labels arrive after setup) plus the
+        slider maxima, so the width never jumps while dragging a slider.
+        """
+        font = QFont(self._time_label.font())
+        font.setPixelSize(UI_FONT_SIZE_PX)
+        metrics = QFontMetrics(font)
+        candidates = [
+            "FOV: 999",  # floor: keeps near-empty datasets from a cramped layout
+            f"T: {self._time_slider.maximum()}",
+            f"FOV: {self._fov_slider.maximum()}",
+        ]
+        candidates += [f"FOV: {label}" for label in self._fov_labels]
+        width = max(metrics.horizontalAdvance(text) for text in candidates)
+        self._time_label.setFixedWidth(width)
+        self._fov_label.setFixedWidth(width)
 
     def _on_time_slider_changed(self, value: int):
         """Handle time slider change."""
@@ -1816,6 +1889,7 @@ class LightweightViewer(QWidget):
         """Show/hide FOV slider based on number of FOVs."""
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
+        self._update_speed_control_visibility()
 
     # ─────────────────────────────────────────────────────────────────────────
     # IMA-191: FOV subset (N per region)
@@ -1865,21 +1939,58 @@ class LightweightViewer(QWidget):
         if self._subset_enabled:
             self._force_refresh()
 
-    def _on_time_play_clicked(self, checked: bool):
-        """Handle time play button click."""
+    def _update_speed_control_visibility(self):
+        """Show the playback speed control when either slider row is shown.
+
+        Uses isHidden() (explicit-hide state) rather than isVisible() so the
+        intent survives a hidden ancestor (e.g. during construction).
+        """
+        self._speed_container.setVisible(
+            not self._time_container.isHidden()
+            or not self._fov_slider_container.isHidden()
+        )
+
+    def _on_playback_fps_changed(self, fps: int):
+        """Handle playback speed change; retime any active play timers."""
+        self._playback_fps = fps
+        interval_ms = _fps_to_interval_ms(fps)
+        for timer in (self._time_play_timer, self._fov_play_timer):
+            if timer is not None and timer.isActive():
+                timer.setInterval(interval_ms)
+
+    def _toggle_play_animation(
+        self,
+        timer: Optional[QTimer],
+        button: QPushButton,
+        step_cb,
+        checked: bool,
+    ) -> Optional[QTimer]:
+        """Start or stop a slider play animation.
+
+        Returns the (possibly newly created) timer so the caller can rebind
+        its instance attribute — a parameter cannot rebind the caller's
+        self._X_play_timer.
+        """
         if checked:
             # Update text for fallback (iconify handles icon automatically)
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("⏸")
-            if self._time_play_timer is None:
-                self._time_play_timer = QTimer(self)
-                self._time_play_timer.timeout.connect(self._time_play_step)
-            self._time_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
+                button.setText("⏸")
+            if timer is None:
+                timer = QTimer(self)
+                timer.timeout.connect(step_cb)
+            timer.start(_fps_to_interval_ms(self._playback_fps))
         else:
             if not ICONIFY_AVAILABLE:
-                self._time_play_btn.setText("▶")
-            if self._time_play_timer:
-                self._time_play_timer.stop()
+                button.setText("▶")
+            if timer:
+                timer.stop()
+        return timer
+
+    def _on_time_play_clicked(self, checked: bool):
+        """Handle time play button click."""
+        self._time_play_timer = self._toggle_play_animation(
+            self._time_play_timer, self._time_play_btn, self._time_play_step, checked
+        )
 
     def _time_play_step(self):
         """Advance time slider by one step (looping)."""
@@ -1892,18 +2003,9 @@ class LightweightViewer(QWidget):
 
     def _on_fov_play_clicked(self, checked: bool):
         """Handle FOV play button click."""
-        if checked:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("⏸")
-            if self._fov_play_timer is None:
-                self._fov_play_timer = QTimer(self)
-                self._fov_play_timer.timeout.connect(self._fov_play_step)
-            self._fov_play_timer.start(SLIDER_PLAY_INTERVAL_MS)
-        else:
-            if not ICONIFY_AVAILABLE:
-                self._fov_play_btn.setText("▶")
-            if self._fov_play_timer:
-                self._fov_play_timer.stop()
+        self._fov_play_timer = self._toggle_play_animation(
+            self._fov_play_timer, self._fov_play_btn, self._fov_play_step, checked
+        )
 
     def _fov_play_step(self):
         """Advance FOV slider by one step (looping)."""
@@ -1968,6 +2070,7 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
+        self._sync_slider_label_widths()
 
         # Set up LUTs based on channel wavelengths
         self._luts = {
@@ -2105,6 +2208,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
@@ -2480,6 +2584,7 @@ class LightweightViewer(QWidget):
             fov_paths = list(fov_paths)[:min_len]
             fov_labels = list(fov_labels)[:min_len]
             self._fov_labels = fov_labels
+        self._sync_slider_label_widths()
         self._zarr_fov_paths = [Path(p) for p in fov_paths]
 
         # Build channel name to index map
@@ -2610,6 +2715,7 @@ class LightweightViewer(QWidget):
         ):
             for fov_in_region in range(n_fov):
                 self._fov_labels.append(f"{region_label}:{fov_in_region}")
+        self._sync_slider_label_widths()
         logger.info(
             f"6D regions mode: labels={self._fov_labels[:5]}..., paths={len(self._zarr_region_paths)}, fovs_per_region={self._fovs_per_region}, offsets={self._region_fov_offsets}"
         )
@@ -2756,6 +2862,7 @@ class LightweightViewer(QWidget):
                 # Show T slider if we have multiple timepoints
                 if new_max_t > 0:
                     self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
 
                 # Update FOV slider max for CURRENT timepoint only
                 if t == self._current_time_idx:
