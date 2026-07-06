@@ -19,11 +19,13 @@ from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QStyleFactory,
     QVBoxLayout,
     QWidget,
@@ -1292,6 +1294,49 @@ def discover_zarr_v3_fovs(base_path: Path) -> Tuple[List[Dict], str]:
     return [], "unknown"
 
 
+def subset_fovs_per_region(fovs: List[Dict], n: int) -> List[Dict]:
+    """Keep at most ``n`` FOVs per region (IMA-191 subset filter).
+
+    "condition" is defined as region/well: the image data model only carries
+    ``region`` and ``fov`` per image, so subsetting groups by ``region`` and
+    keeps the ``n`` FOVs with the smallest integer ``fov`` index within each
+    region.
+
+    Sampling policy: first-n by *integer* fov index. Discovery iterates
+    directories with lexical ``sorted()``, so ``fov_10`` would otherwise precede
+    ``fov_2``; ranking by ``int(fov)`` keeps the sample deterministic and
+    intuitive (fov 0, 1, 2, ... not 0, 1, 10).
+
+    Contract:
+      - ``n <= 0`` (subset disabled) or empty input -> return all FOVs unchanged.
+      - A region with fewer than ``n`` FOVs keeps all of them (no error).
+      - The original relative order of the returned FOVs is preserved.
+
+    Args:
+        fovs: discovery output; each dict has at least ``"region"`` and ``"fov"``.
+        n: maximum FOVs to keep per region.
+
+    Returns:
+        Filtered list of FOV dicts (the same dict objects, in original order).
+    """
+    if n <= 0 or not fovs:
+        return list(fovs)
+
+    # Rank FOVs within each region by integer fov index and mark the first n.
+    by_region: Dict[str, List[Dict]] = {}
+    for entry in fovs:
+        by_region.setdefault(entry["region"], []).append(entry)
+
+    kept_ids = set()
+    for entries in by_region.values():
+        ranked = sorted(entries, key=lambda d: int(d["fov"]))
+        for entry in ranked[:n]:
+            kept_ids.add(id(entry))
+
+    # Preserve original order; dicts are unhashable so identity-filter is used.
+    return [entry for entry in fovs if id(entry) in kept_ids]
+
+
 def data_structure_changed(
     old_data: Optional["xr.DataArray"], new_data: "xr.DataArray"
 ) -> bool:
@@ -1550,6 +1595,11 @@ class LightweightViewer(QWidget):
         self._tiff_handles_lock = threading.Lock()  # protects the dict itself
         self._tiff_handles_max = 128
         self._fov_labels: List[str] = []  # ["A1:0", "A1:1", ...]
+        # IMA-191: subset the slider to N FOVs per region (well). Default off;
+        # applies to datasets loaded from disk (the "review before quantifying"
+        # workflow). Live-acquisition/push slider is unaffected.
+        self._subset_enabled: bool = False
+        self._subset_n_per_region: int = 1
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
         self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
@@ -1681,6 +1731,29 @@ class LightweightViewer(QWidget):
         )  # Hidden until push API sets FOV labels
         slider_layout.addWidget(self._fov_slider_container)
 
+        # IMA-191: FOV subset control — restrict the viewer to N FOVs per region
+        # (well). Applies on the next dataset (re)load. Hidden until a dataset
+        # with multiple regions is loaded (set by _update_subset_control).
+        self._subset_container = QWidget()
+        subset_layout = QHBoxLayout(self._subset_container)
+        subset_layout.setContentsMargins(0, 0, 0, 0)
+        subset_layout.setSpacing(5)
+        self._subset_checkbox = QCheckBox("Subset")
+        self._subset_checkbox.setChecked(self._subset_enabled)
+        self._subset_checkbox.toggled.connect(self._on_subset_toggled)
+        self._subset_spinbox = QSpinBox()
+        self._subset_spinbox.setMinimum(1)
+        self._subset_spinbox.setMaximum(9999)
+        self._subset_spinbox.setValue(self._subset_n_per_region)
+        self._subset_spinbox.setEnabled(self._subset_enabled)
+        self._subset_spinbox.valueChanged.connect(self._on_subset_n_changed)
+        subset_layout.addWidget(self._subset_checkbox)
+        subset_layout.addWidget(self._subset_spinbox)
+        subset_layout.addWidget(QLabel("per well"))
+        subset_layout.addStretch(1)
+        self._subset_container.setVisible(False)  # Shown when >1 region loaded
+        slider_layout.addWidget(self._subset_container)
+
         layout.addWidget(slider_container)
 
         self.setLayout(layout)
@@ -1743,6 +1816,54 @@ class LightweightViewer(QWidget):
         """Show/hide FOV slider based on number of FOVs."""
         n_fovs = len(self._fov_labels) if self._fov_labels else 1
         self._fov_slider_container.setVisible(n_fovs > 1)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # IMA-191: FOV subset (N per region)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _apply_fov_subset(self, fovs: List[Dict]) -> List[Dict]:
+        """Apply the per-region subset to a discovery FOV list when enabled."""
+        if not self._subset_enabled:
+            return fovs
+        return subset_fovs_per_region(fovs, self._subset_n_per_region)
+
+    def _subset_fov_dim(self, arr):
+        """Keep the first N FOVs along a loaded array's ``fov`` axis (6D case).
+
+        A 6D zarr store is a single region whose FOVs live on the ``fov``
+        dimension, so "n per region" == the first ``n`` along that axis.
+        Returns the array unchanged when the subset is disabled, the array is
+        None, has no ``fov`` dim, or already has <= n FOVs.
+        """
+        if arr is None or not self._subset_enabled:
+            return arr
+        n = self._subset_n_per_region
+        try:
+            if "fov" in arr.dims and arr.sizes["fov"] > n:
+                return arr.isel(fov=slice(0, n))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Could not subset fov dim: %s", e)
+        return arr
+
+    def _update_subset_control(self, n_regions: int) -> None:
+        """Show the subset control only when the loaded dataset has >1 region."""
+        try:
+            self._subset_container.setVisible(n_regions > 1)
+        except RuntimeError:
+            # Widget deleted (viewer closing) — safe to ignore.
+            pass
+
+    def _on_subset_toggled(self, checked: bool) -> None:
+        """Enable/disable the per-region FOV subset and reload the dataset."""
+        self._subset_enabled = checked
+        self._subset_spinbox.setEnabled(checked)
+        self._force_refresh()
+
+    def _on_subset_n_changed(self, value: int) -> None:
+        """Change N (FOVs kept per region) and reload if the subset is active."""
+        self._subset_n_per_region = max(1, int(value))
+        if self._subset_enabled:
+            self._force_refresh()
 
     def _on_time_play_clicked(self, checked: bool):
         """Handle time play button click."""
@@ -2964,15 +3085,26 @@ class LightweightViewer(QWidget):
         self._maybe_refresh()
 
     def _dataset_signature(self) -> tuple:
-        """Return a cheap signature that changes when new data likely arrived."""
+        """Return a cheap signature that changes when new data likely arrived.
+
+        IMA-191: the subset state (enabled + N per region) is folded into every
+        signature so toggling the control forces a viewer rebuild, and the FOV
+        count reflects what is actually displayed.
+        """
         base = Path(self.dataset_path)
         fmt = detect_format(base)
+        subset_key = (self._subset_enabled, self._subset_n_per_region)
 
         if fmt == "zarr_v3":
             # For zarr v3, check zarr.json mtime and acquisition_complete flag
             fovs, structure_type = discover_zarr_v3_fovs(base)
             if not fovs:
-                return (fmt, 0, False, 0)
+                return (fmt, 0, False, 0, subset_key)
+
+            # Reflect the subset in the FOV count (per-FOV formats only; a 6D
+            # store is one discovery entry regardless of subset).
+            if structure_type != "6d":
+                fovs = self._apply_fov_subset(fovs)
 
             # Get first zarr path to check metadata
             first_path = fovs[0]["path"]
@@ -2990,12 +3122,12 @@ class LightweightViewer(QWidget):
                 except Exception as e:
                     logger.debug("Error reading zarr metadata: %s", e)
 
-            return (fmt, len(fovs), acquisition_complete, mtime_ns)
+            return (fmt, len(fovs), acquisition_complete, mtime_ns, subset_key)
 
         if fmt == "single_tiff":
             tp_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.isdigit()]
             if not tp_dirs:
-                return (fmt, -1, 0, 0)
+                return (fmt, -1, 0, 0, subset_key)
 
             t_vals = sorted(int(d.name) for d in tp_dirs)
             first_tp = base / str(t_vals[0])
@@ -3027,7 +3159,7 @@ class LightweightViewer(QWidget):
             except Exception as e:
                 logger.debug("Error counting files in latest timepoint: %s", e)
 
-            return (fmt, max(t_vals), len(fov_set), latest_file_count)
+            return (fmt, max(t_vals), len(fov_set), latest_file_count, subset_key)
 
         # ome_tiff
         ome_dir = base / "ome_tiff"
@@ -3060,13 +3192,14 @@ class LightweightViewer(QWidget):
                 logger.debug("Failed to read OME series (may be mid-write): %s", e)
 
         if st is None:
-            return (fmt, n_ome, t_len)
+            return (fmt, n_ome, t_len, subset_key)
         return (
             fmt,
             n_ome,
             t_len,
             st.st_size,
             getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)),
+            subset_key,
         )
 
     def _try_inplace_ndv_update(self, data: "xr.DataArray") -> bool:
@@ -3326,6 +3459,15 @@ class LightweightViewer(QWidget):
             if not fovs:
                 print("No zarr v3 FOVs found")
                 return None
+
+            # IMA-191: 6D stores hold all FOVs inside one array (a single
+            # discovery entry per region); the per-FOV formats have one entry
+            # per FOV. Subset the discovery list here for per-FOV/HCS; the 6D
+            # fov axis is sliced after load in _load_zarr_v3.
+            self._update_subset_control(len({f["region"] for f in fovs}))
+            if structure_type != "6d":
+                fovs = self._apply_fov_subset(fovs)
+
             return self._load_zarr_v3(base_path, fovs, structure_type)
 
         fovs = self._discover_fovs(base_path, fmt)
@@ -3335,6 +3477,9 @@ class LightweightViewer(QWidget):
             return None
 
         # print(f"Format: {fmt}, FOVs: {len(fovs)}")  # Disabled for profiling
+
+        self._update_subset_control(len({f["region"] for f in fovs}))
+        fovs = self._apply_fov_subset(fovs)
 
         if fmt == "ome_tiff":
             return self._load_ome_tiff(base_path, fovs)
@@ -3682,7 +3827,10 @@ class LightweightViewer(QWidget):
         """
         try:
             if structure_type == "6d":
-                return self._load_zarr_v3_6d(fovs[0]["path"])
+                arr = self._load_zarr_v3_6d(fovs[0]["path"])
+                # IMA-191: a 6D store is one region with all FOVs on the `fov`
+                # axis; keep the first N (subset = n per region) when enabled.
+                return self._subset_fov_dim(arr)
             else:
                 return self._load_zarr_v3_5d(fovs)
         except Exception as e:
