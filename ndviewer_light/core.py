@@ -2338,6 +2338,46 @@ class LightweightViewer(QWidget):
                 "Could not emit image_registered signal (viewer may be closed): %s", e
             )
 
+    def register_images_bulk(self, entries):
+        """Bulk-register many image files at once — items ``(t, fov_idx, z, channel, filepath[, page])``.
+
+        Like calling ``register_image`` per plane, but it inserts the whole batch under a single lock
+        and updates the T/FOV sliders + schedules ONE load, instead of one signal per plane. That lets
+        a producer hand over a WHOLE PLATE's file paths up front (tens of thousands of planes) so the
+        FOV slider spans every well immediately, with NO per-plane signal storm. No disk I/O — only the
+        paths are indexed; each plane still loads lazily (and caches) when it is actually scrubbed to.
+        Call on the main thread (it touches the sliders). Safe to call repeatedly (merges)."""
+        max_fov_for_t: Dict[int, int] = {}
+        max_t = self._max_time_idx
+        with self._file_index_lock:
+            for e in entries:
+                t, fov_idx, z, channel, filepath = e[0], e[1], e[2], e[3], e[4]
+                page_idx = e[5] if len(e) > 5 else 0
+                self._file_index[(t, fov_idx, z, channel)] = (filepath, page_idx)
+                if fov_idx > max_fov_for_t.get(t, -1):
+                    max_fov_for_t[t] = fov_idx
+                if t > max_t:
+                    max_t = t
+        for t, mf in max_fov_for_t.items():
+            if mf > self._max_fov_per_time.get(t, -1):
+                self._max_fov_per_time[t] = mf
+        self._updating_sliders = True
+        try:
+            if max_t > self._max_time_idx:
+                self._max_time_idx = max_t
+                self._time_slider.setMaximum(max_t)
+                if max_t > 0:
+                    self._time_container.setVisible(True)
+                    self._update_speed_control_visibility()
+            cur_t = self._current_time_idx
+            pos_max = self._fov_slider_max_for(self._max_fov_per_time.get(cur_t, 0))
+            if pos_max > self._fov_slider.maximum():
+                self._fov_slider.setMaximum(pos_max)
+        finally:
+            self._updating_sliders = False
+        self._update_fov_slider_visibility()
+        self._schedule_debounced_load()
+
     def _on_image_registered(self, t: int, fov_idx: int, _unused1: int, _unused2: int):
         """Handle image registration signal (runs on main thread).
 
