@@ -1696,6 +1696,7 @@ class LightweightViewer(QWidget):
         self._playback_fps: int = DEFAULT_PLAYBACK_FPS  # Shared by both play buttons
         self._time_play_timer: Optional[QTimer] = None  # Timer for T slider animation
         self._fov_play_timer: Optional[QTimer] = None  # Timer for FOV slider animation
+        self._fov_playing: bool = False  # True while FOV play is running -> load only the in-view z-plane
         self._load_debounce_timer: Optional[QTimer] = (
             None  # Debounce for _load_current_fov
         )
@@ -2139,10 +2140,21 @@ class LightweightViewer(QWidget):
         self._time_slider.setValue(next_val)
 
     def _on_fov_play_clicked(self, checked: bool):
-        """Handle FOV play button click."""
+        """Handle FOV play button click.
+
+        While playing we load ONLY the z-plane in view per FOV (see _load_current_fov) so scrubbing
+        the plate stays responsive instead of assembling the whole z-stack each step. When play stops
+        we reload the current FOV at full z so the z-slider works again."""
+        self._fov_playing = checked
         self._fov_play_timer = self._toggle_play_animation(
             self._fov_play_timer, self._fov_play_btn, self._fov_play_step, checked
         )
+        if not checked:
+            try:                            # restore the full z-stack now that play has stopped
+                if self.ndv_viewer and self._channel_names:
+                    self._load_current_position()
+            except (RuntimeError, AttributeError):
+                pass                        # no live viewer/data (e.g. a test double) — nothing to reload
 
     def _fov_play_step(self):
         """Advance FOV slider by one step (looping)."""
@@ -2662,6 +2674,22 @@ class LightweightViewer(QWidget):
         import dask
         import dask.array as da
 
+        # FOV PLAYBACK: assemble ONLY the z-plane currently in view (a single-z array), so nothing
+        # else can be pulled and the per-step dask graph is 1 plane, not n_z. Keeps plate scrubbing
+        # responsive; the full z-stack is restored when play stops (_on_fov_play_clicked).
+        if self._fov_playing:
+            z_cur = self._current_display_z()
+            channel_planes = [
+                da.from_delayed(
+                    dask.delayed(self._load_single_plane)(t, fov_idx, z_cur, channel),
+                    shape=(h, w), dtype=np.uint16,
+                )
+                for channel in self._channel_names
+            ]
+            data = da.stack(channel_planes)[None]   # (1, n_c, h, w) — one z-level
+            self._update_ndv_data(data, z_levels=[z_cur])
+            return
+
         delayed_planes = []
         for z in self._z_levels:
             channel_planes = []
@@ -2680,23 +2708,42 @@ class LightweightViewer(QWidget):
         # Update NDV viewer data without rebuilding (preserves LUTs)
         self._update_ndv_data(data)
 
-    def _update_ndv_data(self, data):
+    def _current_display_z(self):
+        """The z_level VALUE currently shown by ndv's z-slider (fallback: mid-stack).
+
+        ndv's ``current_index`` keys the z axis by POSITION along ``z_level``; map it back to the
+        z-level value that ``_load_single_plane`` expects."""
+        try:
+            ci = self.ndv_viewer.display_model.current_index
+            pos = ci.get("z_level", ci.get(0))
+            if pos is not None and not isinstance(pos, slice):
+                pos = int(pos)
+                if 0 <= pos < len(self._z_levels):
+                    return self._z_levels[pos]
+        except Exception:
+            pass
+        return self._z_levels[len(self._z_levels) // 2] if self._z_levels else 0
+
+    def _update_ndv_data(self, data, z_levels=None):
         """Update NDV viewer with new data array, preserving LUTs.
 
         Args:
             data: numpy or dask array of shape (z_level, channel, y, x).
                   Dask arrays enable lazy loading - planes only load when displayed.
+            z_levels: the z-level coordinate values for this array (default: the full stack). Pass a
+                  length-1 list when handing a single-z array (e.g. during FOV playback).
         """
         if not NDV_AVAILABLE or not self.ndv_viewer:
             return
 
         import xarray as xr
 
+        z_coords = z_levels if z_levels is not None else self._z_levels
         xarr = xr.DataArray(
             data,
             dims=["z_level", "channel", "y", "x"],
             coords={
-                "z_level": self._z_levels,
+                "z_level": z_coords,
                 "channel": list(range(len(self._channel_names))),
             },
         )
