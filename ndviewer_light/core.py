@@ -2197,6 +2197,7 @@ class LightweightViewer(QWidget):
         # Clear previous state
         with self._file_index_lock:
             self._file_index.clear()
+            self._array_index.clear()   # else a stale in-memory plane shadows the new acquisition
         self._close_tiff_handle_cache()
         self._plane_cache.clear()
         self._max_fov_per_time.clear()
@@ -2329,6 +2330,7 @@ class LightweightViewer(QWidget):
             self._array_index.move_to_end(key)                      # LRU: most-recent last
             while len(self._array_index) > self._array_index_max:   # evict oldest -> bounded memory
                 self._array_index.popitem(last=False)
+        self._plane_cache.invalidate(key)   # a pushed array must win over any stale cached file plane
         try:
             self._image_registered.emit(t, fov_idx, 0, 0)
         except RuntimeError as e:
