@@ -2661,9 +2661,12 @@ class LightweightViewer(QWidget):
             return
         if self._image_height == 0 or self._image_width == 0:
             return
-        # Check if we have any registered files
+        # Need at least one registered plane — EITHER a file (register_image) OR an in-memory push
+        # (register_array). A pure-push acquisition (e.g. computed MIP planes streamed via
+        # register_array, with no files) has an empty _file_index; without the _array_index check this
+        # returned early and the viewer kept its zeros placeholder (a black canvas).
         with self._file_index_lock:
-            if not self._file_index:
+            if not self._file_index and not self._array_index:
                 return
 
         t = self._current_time_idx
