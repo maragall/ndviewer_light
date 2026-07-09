@@ -4399,7 +4399,20 @@ class LightweightViewer(QWidget):
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
-        # Recreate viewer with proper dimensions
+        # FAST PATH — when the new data is structurally compatible with what's already shown (same
+        # ndim + channel axis, e.g. scrubbing FOV within one acquisition), just swap the ArrayViewer's
+        # `.data` instead of tearing it down and rebuilding the whole ndv widget. The rebuild is the
+        # dominant cost of FOV navigation; reuse is ~instant and preserves zoom/contrast/slider state.
+        if (getattr(self, "_ndv_data_ndim", None) == data.ndim
+                and getattr(self, "_ndv_channel_axis", None) == channel_axis):
+            try:
+                self.ndv_viewer.data = data
+                self._initiate_channel_label_update()
+                return
+            except Exception as exc:   # any rejection -> fall through to a clean full rebuild
+                logger.debug("in-place ndv data swap failed (%r); rebuilding viewer", exc)
+
+        # SLOW PATH — first load or a structural change: recreate + swap the widget.
         # Note: 3D button is always enabled - Downsampling3DXarrayWrapper handles
         # large volumes by automatically downsampling them for OpenGL rendering
         old_widget = self.ndv_viewer.widget()
@@ -4418,6 +4431,10 @@ class LightweightViewer(QWidget):
         layout.removeWidget(old_widget)
         old_widget.deleteLater()
         layout.insertWidget(idx, self.ndv_viewer.widget(), 1)
+
+        # Remember the displayed structure so the next compatible update takes the fast path.
+        self._ndv_data_ndim = data.ndim
+        self._ndv_channel_axis = channel_axis
 
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
