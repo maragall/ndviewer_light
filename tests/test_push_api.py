@@ -737,6 +737,7 @@ class TestLRUHandleCache:
         viewer._tiff_handles_lock = threading.Lock()
         viewer._tiff_handles_max = 8  # Small limit for fast test
         viewer._file_index = {}
+        viewer._array_index = {}
         viewer._file_index_lock = threading.Lock()
         viewer._plane_cache = __import__(
             "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]
@@ -795,6 +796,7 @@ class TestLRUHandleCache:
         viewer._tiff_handles_lock = threading.Lock()
         viewer._tiff_handles_max = 128
         viewer._file_index = {}
+        viewer._array_index = {}
         viewer._file_index_lock = threading.Lock()
         viewer._plane_cache = __import__(
             "ndviewer_light", fromlist=["MemoryBoundedLRUCache"]

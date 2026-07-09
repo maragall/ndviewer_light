@@ -1656,6 +1656,11 @@ class LightweightViewer(QWidget):
         # (t, fov_idx, z, channel) -> (filepath, page_idx)
         self._file_index: Dict[Tuple[int, int, int, str], Tuple[str, int]] = {}
         self._file_index_lock = threading.Lock()
+        # In-memory push: (t, fov_idx, z, channel) -> ndarray. For producers that compute planes in
+        # memory (e.g. an HCS viewer streaming MIP results as they're computed) and want the growing
+        # slider WITHOUT writing a TIFF per plane. Shares _file_index_lock; checked before the file
+        # index in _get_plane. Kept small by design — push DOWNSAMPLED planes for a scan-slider.
+        self._array_index: Dict[Tuple[int, int, int, str], "np.ndarray"] = {}
         # LRU cache of open TiffFile handles to avoid re-parsing IFD chains.
         # Each entry is (TiffFile, per-file Lock) so reads to different files
         # proceed in parallel while same-file reads are serialized.
@@ -2310,6 +2315,20 @@ class LightweightViewer(QWidget):
                 "Could not emit image_registered signal (viewer may be closed): %s", e
             )
 
+    def register_array(self, t: int, fov_idx: int, z: int, channel: str, array: "np.ndarray"):
+        """Register an in-memory plane (no file). Thread-safe; grows the FOV slider exactly like
+        register_image, so a producer can stream computed planes (e.g. MIP results, or downsampled
+        previews) into a live, scrubbable slider without writing a TIFF per plane. Push downsampled
+        planes to keep this light. _get_plane returns the array directly (bypassing the file read)."""
+        with self._file_index_lock:
+            self._array_index[(t, fov_idx, z, channel)] = array
+        try:
+            self._image_registered.emit(t, fov_idx, 0, 0)
+        except RuntimeError as e:
+            logger.warning(
+                "Could not emit image_registered signal (viewer may be closed): %s", e
+            )
+
     def _on_image_registered(self, t: int, fov_idx: int, _unused1: int, _unused2: int):
         """Handle image registration signal (runs on main thread).
 
@@ -2483,6 +2502,12 @@ class LightweightViewer(QWidget):
         cached_plane = self._plane_cache.get(cache_key)
         if cached_plane is not None:
             return cached_plane
+
+        # In-memory push (register_array) wins over the file index — return it directly, no decode.
+        with self._file_index_lock:
+            arr = self._array_index.get(cache_key)
+        if arr is not None:
+            return arr
 
         # Load from file (lock protects concurrent access from dask workers)
         with self._file_index_lock:
