@@ -1660,7 +1660,10 @@ class LightweightViewer(QWidget):
         # memory (e.g. an HCS viewer streaming MIP results as they're computed) and want the growing
         # slider WITHOUT writing a TIFF per plane. Shares _file_index_lock; checked before the file
         # index in _get_plane. Kept small by design — push DOWNSAMPLED planes for a scan-slider.
-        self._array_index: Dict[Tuple[int, int, int, str], "np.ndarray"] = {}
+        # Bounded (LRU) so a producer streaming many planes can't grow it without limit. Push
+        # DOWNSAMPLED planes for a scan-slider; a well beyond the cap simply reloads from disk/zeros.
+        self._array_index: "OrderedDict[Tuple[int, int, int, str], np.ndarray]" = OrderedDict()
+        self._array_index_max = 1024   # ~256px planes -> <~150 MB; bounded regardless of plate size
         # LRU cache of open TiffFile handles to avoid re-parsing IFD chains.
         # Each entry is (TiffFile, per-file Lock) so reads to different files
         # proceed in parallel while same-file reads are serialized.
@@ -2321,7 +2324,11 @@ class LightweightViewer(QWidget):
         previews) into a live, scrubbable slider without writing a TIFF per plane. Push downsampled
         planes to keep this light. _get_plane returns the array directly (bypassing the file read)."""
         with self._file_index_lock:
-            self._array_index[(t, fov_idx, z, channel)] = array
+            key = (t, fov_idx, z, channel)
+            self._array_index[key] = array
+            self._array_index.move_to_end(key)                      # LRU: most-recent last
+            while len(self._array_index) > self._array_index_max:   # evict oldest -> bounded memory
+                self._array_index.popitem(last=False)
         try:
             self._image_registered.emit(t, fov_idx, 0, 0)
         except RuntimeError as e:
@@ -2506,6 +2513,8 @@ class LightweightViewer(QWidget):
         # In-memory push (register_array) wins over the file index — return it directly, no decode.
         with self._file_index_lock:
             arr = self._array_index.get(cache_key)
+            if arr is not None:
+                self._array_index.move_to_end(cache_key)   # keep recently-viewed planes warm
         if arr is not None:
             return arr
 
