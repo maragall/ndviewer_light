@@ -4497,12 +4497,18 @@ class LightweightViewer(QWidget):
         luts = data.attrs.get("luts", {})
         channel_axis = data.dims.index("channel") if "channel" in data.dims else None
 
+        yx = tuple(int(s) for s in data.shape[-2:])   # spatial extent of the frame
+
         # FAST PATH — when the new data is structurally compatible with what's already shown (same
-        # ndim + channel axis, e.g. scrubbing FOV within one acquisition), just swap the ArrayViewer's
-        # `.data` instead of tearing it down and rebuilding the whole ndv widget. The rebuild is the
-        # dominant cost of FOV navigation; reuse is ~instant and preserves zoom/contrast/slider state.
+        # ndim + channel axis AND same Y,X extent, e.g. scrubbing FOV within one acquisition), just
+        # swap the ArrayViewer's `.data` instead of rebuilding. Reuse is ~instant and preserves
+        # zoom/contrast/slider state. We REQUIRE the same Y,X because the in-place swap keeps the
+        # camera framed for the previous extent — going from a full-res raw frame (e.g. 4168x4168) to
+        # a downsampled projection (e.g. 512x512) would otherwise leave the small image tiny/offscreen
+        # (reads as "black"). A shape change takes the slow path, which reframes the camera.
         if (getattr(self, "_ndv_data_ndim", None) == data.ndim
-                and getattr(self, "_ndv_channel_axis", None) == channel_axis):
+                and getattr(self, "_ndv_channel_axis", None) == channel_axis
+                and getattr(self, "_ndv_data_yx", None) == yx):
             try:
                 self.ndv_viewer.data = data
                 self._initiate_channel_label_update()
@@ -4533,6 +4539,7 @@ class LightweightViewer(QWidget):
         # Remember the displayed structure so the next compatible update takes the fast path.
         self._ndv_data_ndim = data.ndim
         self._ndv_channel_axis = channel_axis
+        self._ndv_data_yx = yx
 
         # Update channel labels after viewer is ready.
         self._initiate_channel_label_update()
