@@ -163,8 +163,40 @@ logger = logging.getLogger(__name__)
 
 
 
-# Module-level variable for voxel scale (used by monkey-patched add_volume)
+# Module-level variable for voxel scale (used by monkey-patched add_volume).
+# (1.0, 1.0, dz_um / pixel_size_um) — the PHYSICAL voxel aspect of the data on disk.
 _current_voxel_scale: Optional[Tuple[float, float, float]] = None
+
+# xy_zoom / z_zoom actually applied by Downsampling3DXarrayWrapper to the last 3D
+# request. 1.0 when nothing was downsampled. The physical aspect above describes the
+# data on DISK; what reaches the GPU is the downsampled array, so the z stretch used at
+# render time is the product of the two (see _effective_voxel_scale).
+_current_volume_zoom_ratio: float = 1.0
+
+
+def _zoom_ratio(dim_info, zoom_factors, spatial_z_names) -> float:
+    """xy zoom divided by z zoom, from a parallel (dim_info, zoom_factors) pair."""
+    xy = z = 1.0
+    for (name, _size), factor in zip(dim_info, zoom_factors):
+        if name in {"y", "x"}:
+            xy = factor
+        elif name in spatial_z_names:
+            z = factor
+    return (xy / z) if z else 1.0
+
+
+def _effective_voxel_scale() -> Optional[Tuple[float, float, float]]:
+    """The z stretch to apply to the array that actually reaches the GPU.
+
+    ``_current_voxel_scale`` is the physical aspect of the data on disk; the wrapper may
+    have downsampled xy and z by different factors on the way to the texture. Multiplying
+    by that ratio is what keeps a dz=1.5um / pixel=0.752um stack looking 2x tall
+    regardless of whether it had to be shrunk to fit GL_MAX_3D_TEXTURE_SIZE.
+    """
+    if _current_voxel_scale is None:
+        return None
+    sx, sy, sz = _current_voxel_scale
+    return (sx, sy, sz * _current_volume_zoom_ratio)
 
 # NDV viewer
 try:
@@ -212,14 +244,36 @@ try:
                 captures the scale that was active at its construction time.
                 """
                 _orig_init(self, *args, **kwargs)
-                # Capture the voxel scale active at construction time
-                # Use try/except to handle frozen vispy objects (e.g., napari's Volume)
-                global _current_voxel_scale
+                # Capture the voxel scale active at construction time.
+                #
+                # vispy's Visual.__init__ ends with self.freeze(), after which __setattr__
+                # REJECTS new attribute names. A plain `self._voxel_scale = ...` therefore
+                # always raised AttributeError here and the old code swallowed it — the
+                # patch bound, ran, and silently did nothing, so every volume rendered
+                # isotropic no matter what metadata was supplied. unfreeze/freeze is what
+                # makes the assignment actually stick.
+                scale = _effective_voxel_scale()
                 try:
-                    self._voxel_scale = _current_voxel_scale
+                    unfreeze = getattr(self, "unfreeze", None)
+                    freeze = getattr(self, "freeze", None)
+                    if unfreeze is not None:
+                        unfreeze()
+                    try:
+                        self._voxel_scale = scale
+                    finally:
+                        if freeze is not None:
+                            freeze()
                 except AttributeError:
-                    # Object is frozen (e.g., napari), skip the patch
-                    pass
+                    # Genuinely un-settable (e.g. a __slots__ subclass); leave unscaled.
+                    return
+                # __init__ already built the vertices, with _voxel_scale still unset.
+                # Rebuild them now that the scale is known, or the z stretch never
+                # reaches the geometry.
+                if scale is not None:
+                    try:
+                        self._create_vertex_data()
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.warning("Failed to rebuild volume vertices: %s", e)
 
             VolumeVisual.__init__ = _patched_init
 
@@ -277,16 +331,16 @@ try:
             _orig_add_volume = VispyArrayCanvas.add_volume
 
             def _patched_add_volume(self, data=None):
-                global _current_voxel_scale
                 handle = _orig_add_volume(self, data)
+                scale = _effective_voxel_scale()
                 # Update camera to account for scaled Z dimension
-                if _current_voxel_scale is not None and data is not None:
+                if scale is not None and data is not None:
                     # Ensure data has at least 3 dimensions
                     shape = getattr(data, "shape", None)
                     if shape is None or len(shape) < 3:
                         return handle
                     try:
-                        sz = _current_voxel_scale[2]
+                        sz = scale[2]
                         if abs(sz - 1.0) > 0.01:
                             z_size = shape[0] * sz
                             max_size = max(shape[1], shape[2], z_size)
@@ -334,6 +388,12 @@ except ImportError as e:
 
 # OpenGL 3D texture size limit (conservative estimate for most GPUs)
 MAX_3D_TEXTURE_SIZE = 2048
+
+# Dimension names that mean "the third SPATIAL axis" (the focus axis of a z-stack).
+# ndv's own DataWrapper.COMMON_Z_AXIS_NAMES is only ("z", "depth", "focus") — it does
+# NOT include "z_level", which is the name this viewer gives the axis everywhere. See
+# Downsampling3DXarrayWrapper.guess_z_axis for why that omission was user-visible.
+SPATIAL_Z_AXIS_NAMES = ("z", "z_level", "depth", "focus")
 
 # Channel label update retry configuration
 CHANNEL_LABEL_UPDATE_MAX_RETRIES = 20
@@ -395,6 +455,38 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     cls._cached_max_texture_size = MAX_3D_TEXTURE_SIZE  # Fallback
             return cls._cached_max_texture_size
 
+        def guess_z_axis(self):
+            """Return the axis ndv should make the 3rd VISIBLE axis in 3D mode.
+
+            Overrides ndv's guess, which picks the CHANNEL axis for this viewer's data
+            and so made the built-in 3D button useless.
+
+            Our arrays are dims ``(z_level, channel, y, x)``. ndv's
+            ``DataWrapper.guess_z_axis`` first looks for a dim named in
+            ``COMMON_Z_AXIS_NAMES`` = ("z", "depth", "focus") — "z_level" is not in it —
+            and then falls back to "the last dim in ``dims[:-2]`` that is not the channel
+            axis". That fallback compares a RAW dim key ("channel") against a NORMALIZED
+            axis index (1), so the guard never fires and it returns the channel axis.
+
+            The user-visible result was: clicking ndv's 3D button built a volume out of
+            the CHANNELS (and pydantic then dropped channel_axis, killing the composite
+            colours) while z stayed a slider. Matching on name against
+            SPATIAL_Z_AXIS_NAMES, and never returning the channel axis, fixes it.
+            """
+            ch = self.guess_channel_axis()
+            for dimkey in self.sizes():
+                if str(dimkey).lower() in SPATIAL_Z_AXIS_NAMES:
+                    normed = self.normalize_axis_key(dimkey)
+                    if normed != ch:
+                        return normed
+            # No named z axis: fall back to ndv's heuristic, but compare NORMALIZED keys
+            # so the channel axis is genuinely excluded.
+            for dimkey in reversed(self.dims[:-2]):
+                normed = self.normalize_axis_key(dimkey)
+                if normed != ch:
+                    return normed
+            return None
+
         @classmethod
         def supports(cls, obj) -> bool:
             """Check if this wrapper supports the given object."""
@@ -450,6 +542,15 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
             # Compute zoom factors for downsampling
             zoom_factors, needs_downsampling = self._compute_simple_zoom_factors(
                 dim_info, max_texture_size, spatial_z_names
+            )
+
+            # Downsampling changes the voxel ASPECT RATIO, so the render-time z stretch
+            # has to be corrected by it. A 10 x 2800 x 2800 stack loses 0.731x in xy and
+            # nothing in z, which alone would render the volume 1.37x too tall. Publish
+            # the ratio for the VolumeVisual patch; see _effective_voxel_scale.
+            global _current_volume_zoom_ratio
+            _current_volume_zoom_ratio = _zoom_ratio(
+                dim_info, zoom_factors, spatial_z_names
             )
 
             if needs_downsampling:
@@ -873,6 +974,13 @@ class LightweightViewer(QWidget):
         self._subset_kept_indices: List[int] = []
         self._channel_names: List[str] = []
         self._z_levels: List[int] = []
+        # Physical voxel size of the CURRENT acquisition, in micrometres. Set by
+        # start_acquisition() in push mode (folder/zarr modes read it off disk instead).
+        # These are what make the 3D volume geometrically correct: without them the
+        # volume renders isotropic, which on a dz=1.5um / pixel=0.752um stack is 2x wrong
+        # along z. Stamped onto every xarray we hand ndv (see _stamp_voxel_size_um).
+        self._pixel_size_um: Optional[float] = None
+        self._dz_um: Optional[float] = None
         self._luts: Dict[int, Any] = {}  # channel_idx -> colormap
         self._current_fov_idx: int = 0
         self._current_time_idx: int = 0
@@ -1376,6 +1484,8 @@ class LightweightViewer(QWidget):
         height: int,
         width: int,
         fov_labels: List[str],
+        pixel_size_um: Optional[float] = None,
+        dz_um: Optional[float] = None,
     ):
         """Configure viewer for a new acquisition.
 
@@ -1388,6 +1498,11 @@ class LightweightViewer(QWidget):
             height: Image height in pixels
             width: Image width in pixels
             fov_labels: FOV labels, e.g. ["A1:0", "A1:1", "A2:0"]
+            pixel_size_um: XY pixel size in micrometres. Optional, but pass it whenever
+                the caller knows it: together with ``dz_um`` it is what makes 3D volume
+                rendering geometrically correct. Omitting both renders the stack
+                isotropic (a dz=1.5um / pixel=0.752um stack comes out ~2x squashed in z).
+            dz_um: Z step in micrometres. See ``pixel_size_um``.
         """
         # Stop any running play animations and pending loads
         self._stop_play_animation(self._time_play_timer, self._time_play_btn)
@@ -1410,6 +1525,8 @@ class LightweightViewer(QWidget):
         self._image_height = height
         self._image_width = width
         self._fov_labels = list(fov_labels)
+        self._pixel_size_um = pixel_size_um
+        self._dz_um = dz_um
         self._sync_slider_label_widths()
         self._init_push_subset()
 
@@ -1452,6 +1569,24 @@ class LightweightViewer(QWidget):
             f"{num_z} z-levels, {len(fov_labels)} FOVs"
         )
 
+    def _stamp_voxel_size_um(self, xarr):
+        """Write this acquisition's physical voxel size onto an xarray, in micrometres.
+
+        ``_set_ndv_data`` turns these attrs into ``_current_voxel_scale``, which the
+        monkey-patched ``VolumeVisual``/``add_volume`` use to stretch z. Push mode built
+        its arrays in code rather than reading them off disk, so before this it handed
+        ndv an array with NO scale attrs and every pushed z-stack rendered isotropic.
+        No-ops when the caller did not supply the sizes.
+        """
+        if self._pixel_size_um is not None:
+            xarr.attrs["pixel_size_um"] = self._pixel_size_um
+            xarr.attrs["pixel_size_x_um"] = self._pixel_size_um
+            xarr.attrs["pixel_size_y_um"] = self._pixel_size_um
+        if self._dz_um is not None:
+            xarr.attrs["dz_um"] = self._dz_um
+            xarr.attrs["pixel_size_z_um"] = self._dz_um
+        return xarr
+
     def _rebuild_viewer_for_acquisition(self):
         """Rebuild the NDV viewer for the current acquisition configuration."""
         if not NDV_AVAILABLE or not self.ndv_viewer:
@@ -1477,6 +1612,7 @@ class LightweightViewer(QWidget):
         )
         xarr.attrs["luts"] = self._luts
         xarr.attrs["channel_names"] = self._channel_names
+        self._stamp_voxel_size_um(xarr)
 
         self._xarray_data = xarr
         self._set_ndv_data(xarr)
@@ -1942,6 +2078,7 @@ class LightweightViewer(QWidget):
         )
         xarr.attrs["luts"] = self._luts
         xarr.attrs["channel_names"] = self._channel_names
+        self._stamp_voxel_size_um(xarr)
 
         self._xarray_data = xarr
 
