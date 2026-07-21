@@ -96,6 +96,80 @@ class TestMonkeyPatchesAreBound:
         assert params == ["self", "data"]
 
 
+class TestFailuresAreNotSilent:
+    """IMA-257: a volume that cannot be built must SAY so, not render empty.
+
+    The whole 3D path is defensive — a rename, a frozen visual, a failed downsample, a
+    camera that will not frame — and every one of those used to end in `pass` or a debug
+    log. The viewer then showed an unscaled or blank box that looks plausible and is
+    wrong. Each swallow point now records a reason that a caller can ask for.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        core._clear_volume_problem()
+        yield
+        core._clear_volume_problem()
+
+    def test_patches_applied_cleanly_on_this_install(self):
+        """The import-time guard: None means the patch block really ran."""
+        assert core.VOLUME_PATCH_ERROR is None, (
+            f"3D volume patches did not apply: {core.VOLUME_PATCH_ERROR}"
+        )
+
+    def test_no_problem_reported_when_nothing_is_wrong(self):
+        assert core.last_volume_problem() is None
+
+    def test_a_problem_is_readable_by_the_caller(self):
+        core._note_volume_problem("volume too large to upload")
+        assert "too large" in core.last_volume_problem()
+
+    def test_a_problem_is_cleared_by_a_good_volume(self):
+        core._note_volume_problem("something broke")
+        assert core.last_volume_problem() is not None
+        core._clear_volume_problem()
+        assert core.last_volume_problem() is None
+
+    def test_no_except_in_the_volume_path_is_silent(self):
+        """Structural guard: every handler in the patch block must report or re-raise.
+
+        Written structurally on purpose. The individual failures need a GL context or a
+        vispy API break to provoke, so a behavioural test would have to fake them — and
+        a faked test of a `pass` proves nothing. What actually regressed here was someone
+        adding a quiet `except`, and that is visible in the source.
+        """
+        import inspect
+
+        src = inspect.getsource(core).splitlines()
+        # The volume patch block, from the vispy import to the end of add_volume patching.
+        start = next(i for i, ln in enumerate(src) if "Monkeypatch vispy VolumeVisual" in ln)
+        end = next(i for i, ln in enumerate(src) if "_camera_scale_patch = True" in ln)
+
+        silent = []
+        for i in range(start, end):
+            if src[i].strip().startswith("except"):
+                body = "\n".join(src[i + 1 : i + 8])
+                reports = "_note_volume_problem" in body or "logger.error" in body
+                reraises = "raise" in body
+                if not (reports or reraises):
+                    silent.append(f"line {i + 1}: {src[i].strip()}")
+        assert not silent, (
+            "silent except in the 3D volume path — a failed volume would render blank "
+            f"or isotropic with nothing said (IMA-257): {silent}"
+        )
+
+    def test_the_reason_names_the_consequence_not_just_the_exception(self):
+        """A message that only says 'ValueError' does not tell the user what they see."""
+        core._note_volume_problem(
+            "could not downsample a (10, 4000, 4000) volume to fit the 2048px GL "
+            "texture limit (boom) — the volume is too large to upload and will "
+            "render blank"
+        )
+        msg = core.last_volume_problem()
+        assert "render blank" in msg  # what the USER observes
+        assert "2048" in msg  # the actionable number
+
+
 class TestGuessZAxis:
     """ndv's 3D button asks the wrapper which axis to make the third visible one."""
 

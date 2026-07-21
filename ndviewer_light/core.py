@@ -163,6 +163,10 @@ logger = logging.getLogger(__name__)
 
 
 
+# Set if the 3D volume monkey-patches could not be applied at import (an ndv/vispy API
+# rename). None means they installed fine. See the except block at the end of the patch.
+VOLUME_PATCH_ERROR: Optional[str] = None
+
 # Module-level variable for voxel scale (used by monkey-patched add_volume).
 # (1.0, 1.0, dz_um / pixel_size_um) — the PHYSICAL voxel aspect of the data on disk.
 _current_voxel_scale: Optional[Tuple[float, float, float]] = None
@@ -172,6 +176,33 @@ _current_voxel_scale: Optional[Tuple[float, float, float]] = None
 # data on DISK; what reaches the GPU is the downsampled array, so the z stretch used at
 # render time is the product of the two (see _effective_voxel_scale).
 _current_volume_zoom_ratio: float = 1.0
+
+
+# The most recent reason 3D volume rendering degraded or failed, or None if the last
+# volume built cleanly. IMA-257: this path used to detect its own failures and show the
+# user nothing — an unscaled or entirely blank volume looks plausible and is wrong. Every
+# `except` in the volume path now records here, so a caller (and a test) can ASK.
+_volume_problem: Optional[str] = None
+
+
+def last_volume_problem() -> Optional[str]:
+    """Why the last 3D volume failed or degraded, or None if it was fine.
+
+    Embedders should surface this after switching a stack into 3D. A volume that could
+    not be built must say so rather than render empty.
+    """
+    return _volume_problem
+
+
+def _note_volume_problem(msg: str) -> None:
+    global _volume_problem
+    _volume_problem = msg
+    logger.error("3D volume rendering degraded: %s", msg)
+
+
+def _clear_volume_problem() -> None:
+    global _volume_problem
+    _volume_problem = None
 
 
 def _zoom_ratio(dim_info, zoom_factors, spatial_z_names) -> float:
@@ -263,8 +294,14 @@ try:
                     finally:
                         if freeze is not None:
                             freeze()
-                except AttributeError:
+                except AttributeError as e:
                     # Genuinely un-settable (e.g. a __slots__ subclass); leave unscaled.
+                    if scale is not None:
+                        _note_volume_problem(
+                            f"could not attach the voxel scale to {type(self).__name__} "
+                            f"({e}) — the volume renders isotropic, so z is wrong by a "
+                            f"factor of {scale[2]:.2f}"
+                        )
                     return
                 # __init__ already built the vertices, with _voxel_scale still unset.
                 # Rebuild them now that the scale is known, or the z stretch never
@@ -272,8 +309,12 @@ try:
                 if scale is not None:
                     try:
                         self._create_vertex_data()
+                        _clear_volume_problem()
                     except Exception as e:  # pragma: no cover - defensive
-                        logger.warning("Failed to rebuild volume vertices: %s", e)
+                        _note_volume_problem(
+                            f"could not build the volume's vertices ({e}) — the volume "
+                            f"is missing or renders isotropic"
+                        )
 
             VolumeVisual.__init__ = _patched_init
 
@@ -353,15 +394,29 @@ try:
                                 margin=0.01,
                             )
                     except Exception as e:
-                        logger.warning(
-                            "Failed to adjust camera for anisotropic voxels: %s", e
+                        _note_volume_problem(
+                            f"could not frame the camera for anisotropic voxels ({e}) — "
+                            f"the volume may be offscreen, which reads as blank"
                         )
                 return handle
 
             VispyArrayCanvas.add_volume = _patched_add_volume
             VispyArrayCanvas._camera_scale_patch = True
-    except ImportError:
-        pass  # vispy not available
+    except ImportError as e:
+        # vispy not available: no 3D at all, and that IS the expected state on a
+        # headless/GL-less install, so it is not an error.
+        logger.info("3D volume patches not applied (vispy unavailable): %s", e)
+    except Exception as e:
+        # An upstream RENAME lands here, and this is the failure that must never be
+        # quiet (IMA-257): the viewer keeps working, 3D silently reverts to isotropic,
+        # and nothing anywhere says why. tests/test_3d_volume_rendering.py asserts the
+        # patches stay bound by name so this is caught in CI, not by a user.
+        _volume_problem = VOLUME_PATCH_ERROR = f"{type(e).__name__}: {e}"
+        logger.error(
+            "3D volume patches FAILED to apply (%s) — volumes will render isotropic; "
+            "ndv/vispy has probably changed its API",
+            VOLUME_PATCH_ERROR,
+        )
 
 except ImportError:
     NDV_AVAILABLE = False
@@ -564,7 +619,14 @@ if NDV_AVAILABLE and LAZY_LOADING_AVAILABLE:
                     downsampled = ndimage_zoom(data, zoom_factors, order=0)
                     return downsampled.astype(data.dtype)
                 except Exception as e:
-                    logger.warning(f"Downsampling failed: {e}, returning original data")
+                    # Returning the original is the only thing we CAN do, but it is
+                    # oversized for the GPU, so the texture upload fails and the user
+                    # gets a blank box. Say so (IMA-257) rather than look successful.
+                    _note_volume_problem(
+                        f"could not downsample a {data.shape} volume to fit the "
+                        f"{max_texture_size}px GL texture limit ({e}) — the volume is "
+                        f"too large to upload and will render blank"
+                    )
                     return data
 
             return data
